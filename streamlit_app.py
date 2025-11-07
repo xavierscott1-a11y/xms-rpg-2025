@@ -388,15 +388,10 @@ with col_stats:
 with col_chat:
     st.header("The Story Log")
     
-    # 1. Create a placeholder container for the dynamic chat log
-    chat_container = st.container()
-
     # Display the conversation history in reverse order (newest on top)
-    with chat_container:
-        for message in reversed(st.session_state["history"]):
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
+    for message in reversed(st.session_state["history"]):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
     # --- User Input and API Call Logic (Only active when adventure has started) ---
     if game_started:
@@ -409,11 +404,6 @@ with col_chat:
             
             full_prompt = f"({current_player_name}'s Turn): {prompt}"
             st.session_state["history"].append({"role": "user", "content": full_prompt})
-            with st.chat_message("user"):
-                st.markdown(full_prompt)
-
-            # 2. Action Detection (The Gatekeeper)
-            raw_roll = extract_roll(prompt)
             
             # --- Start Assistant Response ---
             with st.chat_message("assistant"):
@@ -428,6 +418,7 @@ with col_chat:
                     # =========================================================================
                     # A) LOGIC CHECK (IF A ROLL IS DETECTED)
                     # =========================================================================
+                    raw_roll = extract_roll(prompt)
                     if raw_roll is not None:
                         st.info(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
                         
