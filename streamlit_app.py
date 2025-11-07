@@ -94,6 +94,7 @@ def get_api_contents(history_list):
     contents = []
     for msg in history_list:
         if msg["content"] and isinstance(msg["content"], str):
+            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
@@ -139,7 +140,7 @@ def create_new_character(setting, genre, player_name):
             st.session_state["characters"][player_name] = char_data
             st.session_state["current_player"] = player_name
             
-            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} is ready! Welcome. You are the active player."})
+            st.session_state["history"].append({"role": "assistant", "content": f"Welcome, {char_data['name']}! Your journey begins in the {setting} world of {genre}. What is your first move?"})
 
         except Exception as e:
             st.error(f"Character creation failed for {player_name}: {e}. Try a simpler name.")
@@ -158,7 +159,7 @@ def extract_roll(text):
 st.set_page_config(layout="wide")
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
-# --- Initialize Session State ---
+# --- Initialize Session State (FIXED) ---
 if "history" not in st.session_state:
     st.session_state["history"] = []
 if "characters" not in st.session_state:
@@ -167,6 +168,8 @@ if "current_player" not in st.session_state:
     st.session_state["current_player"] = None
 if "final_system_instruction" not in st.session_state:
     st.session_state["final_system_instruction"] = None
+if "new_player_name" not in st.session_state: # <-- FIX ADDED HERE
+    st.session_state["new_player_name"] = "" 
 
 
 # --- Sidebar (Settings, Character Sheet & Controls) ---
@@ -180,6 +183,7 @@ selected_genre = st.sidebar.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_
 st.sidebar.header("Roster & Controls")
 
 # Input field for new character name
+# The 'key' now safely exists in st.session_state
 new_player_name = st.sidebar.text_input("New Player Name", key="new_player_name", disabled=game_started and st.session_state["new_player_name"] == "")
 
 # Character Creation Button: Requires a name and calls the updated function
@@ -191,7 +195,6 @@ if st.sidebar.button("Add Character to Game", disabled=game_started and not new_
 if st.session_state["characters"]:
     player_options = list(st.session_state["characters"].keys())
     
-    # Ensure current_player is in options, set initial index
     if st.session_state["current_player"] in player_options:
         default_index = player_options.index(st.session_state["current_player"])
     else:
