@@ -1,13 +1,14 @@
 import streamlit as st
 import os
 import json
+import re # Added for roll detection
 from google import genai
 # Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-# --- Configuration (Based on all previous steps) ---
+# --- Configuration (API Client Setup) ---
 
 # SECURITY: Loads the key from Streamlit Secrets (GEMINI_API_KEY)
 try:
@@ -61,6 +62,26 @@ character_creation_config = GenerateContentConfig(
     response_schema=CharacterSheet,
 )
 
+# Define Skill Check Schema
+class SkillCheckResolution(BaseModel):
+    """Structured data for resolving a single player action."""
+    action: str = Field(description="The action the player attempted.")
+    attribute_used: str = Field(description="The core attribute used for the check (e.g., 'Dexterity').")
+    difficulty_class: int = Field(description="The DC set by the DM/Gemini (e.g., 5, 15, 20).")
+    player_d20_roll: int = Field(description="The raw D20 roll the player provided.")
+    attribute_modifier: int = Field(description="The modifier used in the calculation.")
+    total_roll: int = Field(description="The calculated result: roll + modifier.")
+    outcome_result: str = Field(description="The result: 'Success', 'Failure', 'Critical Success', or 'Critical Failure'.")
+    hp_change: int = Field(description="Damage taken (negative) or health gained (positive). Default 0.", default=0)
+    consequence_narrative: str = Field(description="A brief description of the immediate mechanical consequence.")
+
+# Define Skill Check Configuration
+skill_check_config = GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=SkillCheckResolution,
+)
+
+
 # --- Functions ---
 
 def create_new_character():
@@ -78,17 +99,32 @@ def create_new_character():
                 contents=creation_prompt,
                 config=character_creation_config
             )
-            # Load the JSON string into a Python dictionary
             char_data = json.loads(char_response.text)
 
-            # Save the new character data to Streamlit's session state
             st.session_state["character"] = char_data
-            # Log the successful character creation
             st.session_state["history"].append({"role": "assistant", "content": f"Welcome, {char_data['name']}! Your character is ready. What is your first move? The wasteland awaits."})
 
         except Exception as e:
-            st.error(f"Character creation failed: {e}. Ensure the model returned valid JSON.")
+            st.error(f"Character creation failed: {e}. Please check the logs.")
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character. Please try again."})
+
+def get_api_contents(history_list):
+    """Helper function to convert Streamlit history to the API's Content/Part format."""
+    contents = []
+    for msg in history_list:
+        if msg["content"] and isinstance(msg["content"], str):
+            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
+            api_role = "model" if msg["role"] == "assistant" else msg["role"]
+            contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
+    return contents
+
+def extract_roll(text):
+    """Helper function to extract a number (1-20) indicating a dice roll."""
+    # Searches for a number between 1 and 20 near keywords like 'roll' or 'try'
+    match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
+    if match and 1 <= int(match.group(2)) <= 20:
+        return int(match.group(2))
+    return None
 
 
 # --- Streamlit UI Setup ---
@@ -103,7 +139,8 @@ if "history" not in st.session_state:
 if "character" not in st.session_state:
     st.session_state["character"] = None
 
-# --- Sidebar (Character Sheet) ---
+
+# --- Sidebar (Character Sheet & Controls) ---
 st.sidebar.header("Character Sheet")
 if st.session_state["character"]:
     char = st.session_state["character"]
@@ -115,58 +152,105 @@ if st.session_state["character"]:
     st.sidebar.markdown(f"**Inventory:** " + ", ".join(char['inventory']))
 else:
     st.sidebar.write("Start a new character to begin the game!")
-    # Add the button
     with st.sidebar:
         st.button("Start New Character", on_click=create_new_character)
 
 # --- Main Game Loop Display ---
-
-# Display the conversation history
 for message in st.session_state["history"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- User Input and API Call ---
+
+# --- User Input and API Call Logic ---
 prompt = st.chat_input("What do you do?")
 
 if prompt:
-    # 1. Check if character exists before allowing play
+    # 1. Basic Checks
     if not st.session_state["character"]:
         st.warning("Please create a character first!")
         st.stop()
 
-    # 2. Add the user message to the display and history
+    # 2. Add user message to display and history
     st.session_state["history"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Call the Gemini API (Narrative Call)
+    # 3. Action Detection (The Gatekeeper)
+    raw_roll = extract_roll(prompt)
+    
+    # --- Start Assistant Response ---
     with st.chat_message("assistant"):
         with st.spinner("The DM is thinking..."):
             
-            # Build the contents list for the API call
-            contents = []
-            for msg in st.session_state["history"]:
-                if msg["content"] and isinstance(msg["content"], str):
-                    # FIX: Map Streamlit's "assistant" role to the Gemini API's required "model" role
-                    api_role = "model" if msg["role"] == "assistant" else msg["role"]
-                    
-                    contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
+            final_response_text = ""
             
+            # =========================================================================
+            # A) LOGIC CHECK (IF A ROLL IS DETECTED)
+            # =========================================================================
+            if raw_roll is not None:
+                st.info(f"Skill Check Detected! Player roll: {raw_roll}")
+                
+                logic_prompt = f"""
+                RESOLVE A PLAYER ACTION:
+                1. Character Stats (JSON): {json.dumps(st.session_state["character"])}
+                2. Player Action: "{prompt}"
+                3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20). 
+                4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
+                5. Return ONLY the JSON object following the SkillCheckResolution schema.
+                """
+                
+                try:
+                    # 1st API Call: Logic Call (Forced JSON Output)
+                    logic_response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=logic_prompt,
+                        config=skill_check_config
+                    )
+                    
+                    skill_check_outcome = json.loads(logic_response.text)
+                    
+                    # Display the mechanical result to the user
+                    st.toast(f"Result: {skill_check_outcome['outcome_result']} (Roll: {skill_check_outcome['total_roll']} vs DC: {skill_check_outcome['difficulty_class']})")
+                    
+                    # Prepare the follow-up narrative prompt
+                    follow_up_prompt = f"""
+                    The player's last risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
+                    1. Narrate the vivid, descriptive consequence of this result.
+                    2. Update the scene based on the outcome and ask the player what they do next.
+                    """
+                    
+                    # Add the JSON resolution and follow-up prompt to history for the final narrative call
+                    st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
+                    st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
+
+                except Exception as e:
+                    # Fallback if the JSON parsing fails
+                    st.error(f"Logic Call Failed: {e}")
+                    # Remove the user's latest prompt to prevent the failure from crashing history
+                    st.session_state["history"].pop() 
+
+            
+            # =========================================================================
+            # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
+            # =========================================================================
+            
+            # The narrative call runs whether a simple prompt was given or if it's following up the logic call.
             try:
-                # The primary API call for narrative
-                response = client.models.generate_content(
+                # Use the entire conversation history (including the final prompt/JSON for continuity)
+                narrative_response = client.models.generate_content(
                     model='gemini-2.5-flash',
-                    contents=contents,
+                    contents=get_api_contents(st.session_state["history"]),
                     config=narrative_config
                 )
-
-                # 4. Display the DM's response
-                st.markdown(response.text)
-
-                # 5. Update history with the DM's response
-                st.session_state["history"].append({"role": "assistant", "content": response.text})
-            
+                final_response_text = narrative_response.text
+                
             except Exception as e:
-                 st.error(f"Narrative API Error. The system may need to be restarted: {e}")
-                 st.session_state["history"].append({"role": "assistant", "content": "Narrative call failed due to API error."})
+                final_response_text = f"Narrative API Error. The system may need to be restarted: {e}"
+
+
+            # 4. Display the DM's final response
+            st.markdown(final_response_text)
+
+            # 5. Update history with the DM's final response (if successful)
+            if not final_response_text.startswith("Narrative API Error"):
+                st.session_state["history"].append({"role": "assistant", "content": final_response_text})
