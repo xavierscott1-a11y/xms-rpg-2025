@@ -1,5 +1,4 @@
 # Install the official Google GenAI SDK for Python
-!pip install -q -U google-genai
 
 import os
 from google.colab import userdata
