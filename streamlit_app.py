@@ -6,7 +6,6 @@ from google import genai
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
-import sys
 
 # --- Configuration (Based on all previous steps) ---
 
@@ -40,7 +39,7 @@ narrative_config = GenerateContentConfig(
 
 # --- Schemas (Required for Structured Output) ---
 
-# Define Character Sheet Schema (Needs BaseModel and Field from Pydantic)
+# Define Character Sheet Schema
 class CharacterSheet(BaseModel):
     """The full character data structure."""
     name: str = Field(description="The player's chosen name.")
@@ -84,6 +83,7 @@ def create_new_character():
 
             # Save the new character data to Streamlit's session state
             st.session_state["character"] = char_data
+            # Log the successful character creation
             st.session_state["history"].append({"role": "assistant", "content": f"Welcome, {char_data['name']}! Your character is ready. What is your first move? The wasteland awaits."})
 
         except Exception as e:
@@ -143,13 +143,15 @@ if prompt:
     # 3. Call the Gemini API (Narrative Call)
     with st.chat_message("assistant"):
         with st.spinner("The DM is thinking..."):
+            
             # Build the contents list for the API call
-            # This ensures only valid, non-empty messages are sent to the API
             contents = []
             for msg in st.session_state["history"]:
-                # FIX: Only add messages with actual content to prevent the API rejection (ClientError)
-                if msg["content"] and isinstance(msg["content"], str): 
-                    contents.append(Content(role=msg["role"], parts=[Part(text=msg["content"])]))
+                if msg["content"] and isinstance(msg["content"], str):
+                    # FIX: Map Streamlit's "assistant" role to the Gemini API's required "model" role
+                    api_role = "model" if msg["role"] == "assistant" else msg["role"]
+                    
+                    contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
             
             try:
                 # The primary API call for narrative
@@ -166,6 +168,5 @@ if prompt:
                 st.session_state["history"].append({"role": "assistant", "content": response.text})
             
             except Exception as e:
-                 st.error(f"Narrative API Error. Try clearing chat history: {e}")
-                 # Append a placeholder error message to history so the flow doesn't crash on next turn
-                 st.session_state["history"].append({"role": "assistant", "content": "Narrative call failed."})
+                 st.error(f"Narrative API Error. The system may need to be restarted: {e}")
+                 st.session_state["history"].append({"role": "assistant", "content": "Narrative call failed due to API error."})
