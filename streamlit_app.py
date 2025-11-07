@@ -135,12 +135,14 @@ def create_new_character(setting, genre, player_name):
             char_data = json.loads(char_response.text)
             char_data['name'] = player_name # Ensure the name is exactly what the user input
 
-            # Store the character and set the active player
+            # Store the character and set the active player if this is the first one
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
-            st.session_state["current_player"] = player_name
+            if not st.session_state["current_player"]:
+                 st.session_state["current_player"] = player_name
             
-            st.session_state["history"].append({"role": "assistant", "content": f"Welcome, {char_data['name']}! Your journey begins in the {setting} world of {genre}. What is your first move?"})
+            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
+            st.rerun() # Rerun to update the player selector
 
         except Exception as e:
             st.error(f"Character creation failed for {player_name}: {e}. Try a simpler name.")
@@ -153,13 +155,51 @@ def extract_roll(text):
         return int(match.group(2))
     return None
 
+def start_adventure(setting, genre):
+    """Function to generate the initial narrative hook."""
+    if st.session_state["current_player"] is None:
+        st.error("Please create at least one character before starting the adventure!")
+        return
+        
+    intro_prompt = f"""
+    The game is about to begin. The setting is {setting}, {genre}. 
+    Provide a dramatic and engaging introductory narrative (about 3-4 paragraphs). 
+    This introduction should:
+    1. Name the starting location (e.g., 'The Whispering Alley').
+    2. Describe the scenery vividly.
+    3. Present an immediate, intriguing event or challenge (the hook) that requires the players to act.
+    4. End by asking the active player, {st.session_state['current_player']}, what they do next.
+    """
+    
+    with st.spinner("Generating epic adventure hook..."):
+        try:
+            # We use the full final system instruction
+            final_narrative_config = GenerateContentConfig(
+                system_instruction=st.session_state["final_system_instruction"]
+            )
+            
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=intro_prompt,
+                config=final_narrative_config
+            )
+            
+            # Reset history and start with the DM's introduction
+            st.session_state["history"] = []
+            st.session_state["history"].append({"role": "assistant", "content": response.text})
+            st.session_state["adventure_started"] = True # Mark the game as started
+            st.rerun() # Rerun to show the new history
+
+        except Exception as e:
+            st.error(f"Failed to start adventure: {e}")
+
 
 # --- Streamlit UI Setup ---
 
 st.set_page_config(layout="wide")
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
-# --- Initialize Session State (FIXED) ---
+# --- Initialize Session State (FINAL CHECK) ---
 if "history" not in st.session_state:
     st.session_state["history"] = []
 if "characters" not in st.session_state:
@@ -168,165 +208,190 @@ if "current_player" not in st.session_state:
     st.session_state["current_player"] = None
 if "final_system_instruction" not in st.session_state:
     st.session_state["final_system_instruction"] = None
-if "new_player_name" not in st.session_state: # <-- FIX ADDED HERE
+if "new_player_name" not in st.session_state: 
     st.session_state["new_player_name"] = "" 
+if "adventure_started" not in st.session_state:
+    st.session_state["adventure_started"] = False
 
 
-# --- Sidebar (Settings, Character Sheet & Controls) ---
-st.sidebar.header("Game Settings")
+# --- Define the three columns ---
+col_settings, col_chat, col_stats = st.columns([2, 5, 3])
 
-game_started = bool(st.session_state["current_player"])
-selected_setting = st.sidebar.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), disabled=game_started)
-selected_genre = st.sidebar.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], disabled=game_started)
+game_started = st.session_state["adventure_started"]
 
+# =========================================================================
+# LEFT COLUMN (Settings & Controls)
+# =========================================================================
+with col_settings:
+    st.header("Game Setup")
 
-st.sidebar.header("Roster & Controls")
+    # Genre selection
+    selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), disabled=game_started, key="setup_setting")
+    selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], disabled=game_started, key="setup_genre")
 
-# Input field for new character name
-# The 'key' now safely exists in st.session_state
-new_player_name = st.sidebar.text_input("New Player Name", key="new_player_name", disabled=game_started and st.session_state["new_player_name"] == "")
-
-# Character Creation Button: Requires a name and calls the updated function
-if st.sidebar.button("Add Character to Game", disabled=game_started and not new_player_name):
-    # Pass the name from the input field
-    create_new_character(selected_setting, selected_genre, new_player_name)
-
-# Player Rotation Dropdown/Selector
-if st.session_state["characters"]:
-    player_options = list(st.session_state["characters"].keys())
+    st.subheader("Roster")
     
-    if st.session_state["current_player"] in player_options:
-        default_index = player_options.index(st.session_state["current_player"])
+    # Input field for new character name
+    if not game_started:
+        st.text_input("New Player Name", key="new_player_name_input")
+        
+        # Character Creation Button
+        if st.button("Add Character to Party", disabled=not st.session_state["new_player_name_input"] or game_started):
+            create_new_character(selected_setting, selected_genre, st.session_state["new_player_name_input"])
+        
+        # Display roster summary
+        if st.session_state["characters"]:
+             st.markdown(f"**Party:** {', '.join(st.session_state['characters'].keys())}")
+
+    # START ADVENTURE BUTTON (Bottom of Left Column)
+    if not game_started and st.session_state["current_player"]:
+         st.button("🚀 START ADVENTURE", 
+                   on_click=lambda: start_adventure(selected_setting, selected_genre), 
+                   type="primary")
+    elif game_started:
+         st.markdown("---")
+         st.markdown("Adventure in Progress!")
+
+
+# =========================================================================
+# RIGHT COLUMN (Active Player Stats)
+# =========================================================================
+with col_stats:
+    st.header("Active Player Stats")
+    
+    active_char = st.session_state["characters"].get(st.session_state["current_player"])
+
+    if st.session_state["characters"]:
+        # Player selector dropdown
+        player_options = list(st.session_state["characters"].keys())
+        default_index = player_options.index(st.session_state["current_player"]) if st.session_state["current_player"] in player_options else 0
+        
+        st.selectbox(
+            "Current Turn",
+            player_options,
+            key="player_selector",
+            index=default_index,
+            disabled=not game_started # Disable switching during core narrative responses
+        )
+        st.session_state["current_player"] = st.session_state["player_selector"]
+        
+        st.markdown("---")
+        
+        # Display stats
+        if active_char:
+            st.subheader(active_char['name'])
+            st.markdown(f"**Class:** {active_char['race_class']}")
+            st.markdown(f"**HP:** {active_char['current_hp']}")
+            st.markdown(f"**Sanity/Morale:** {active_char['morale_sanity']}")
+            st.markdown("---")
+            st.markdown("**Inventory:** " + ", ".join(active_char['inventory']))
     else:
-        default_index = 0
+        st.write("No characters created.")
+
+
+# =========================================================================
+# CENTER COLUMN (Game Chat and Logic)
+# =========================================================================
+with col_chat:
+    st.header("The Story Log")
     
-    st.sidebar.selectbox(
-        "Active Player Turn",
-        player_options,
-        key="player_selector",
-        index=default_index
-    )
-    # Update current_player state based on selector
-    st.session_state["current_player"] = st.session_state["player_selector"]
+    # Display the conversation history
+    for message in st.session_state["history"]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
 
-# Display Active Player Sheet (Uses the selected player)
-st.sidebar.header("Current Player Stats")
-active_char = st.session_state["characters"].get(st.session_state["current_player"])
+    # --- User Input and API Call Logic (Only active when adventure has started) ---
+    if game_started:
+        prompt = st.chat_input("What do you do?")
 
-if active_char:
-    st.sidebar.markdown(f"**Name:** {active_char['name']}")
-    st.sidebar.markdown(f"**Class:** {active_char['race_class']}")
-    st.sidebar.markdown(f"**HP:** {active_char['current_hp']}")
-    st.sidebar.markdown(f"**Sanity:** {active_char['morale_sanity']}")
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**Inventory:** " + ", ".join(active_char['inventory']))
-else:
-    st.sidebar.write("No characters created.")
-
-
-# --- Main Game Loop Display ---
-for message in st.session_state["history"]:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-
-# --- User Input and API Call Logic ---
-prompt = st.chat_input("What do you do?")
-
-if prompt:
-    # 1. Basic Checks
-    if not st.session_state["current_player"]:
-        st.warning("Please create a character first!")
-        st.stop()
-    
-    current_player_name = st.session_state["current_player"]
-    active_char = st.session_state["characters"].get(current_player_name)
-    
-    # 2. Add user message to display and history (with player name prepended)
-    full_prompt = f"({current_player_name}'s Turn): {prompt}"
-    st.session_state["history"].append({"role": "user", "content": full_prompt})
-    with st.chat_message("user"):
-        st.markdown(full_prompt)
-
-    # 3. Action Detection (The Gatekeeper)
-    raw_roll = extract_roll(prompt)
-    
-    # --- Start Assistant Response ---
-    with st.chat_message("assistant"):
-        with st.spinner("The DM is thinking..."):
+        if prompt:
+            # 1. Add user message to display and history (with player name prepended)
+            current_player_name = st.session_state["current_player"]
+            active_char = st.session_state["characters"].get(current_player_name)
             
-            final_response_text = ""
+            full_prompt = f"({current_player_name}'s Turn): {prompt}"
+            st.session_state["history"].append({"role": "user", "content": full_prompt})
+            with st.chat_message("user"):
+                st.markdown(full_prompt)
+
+            # 2. Action Detection (The Gatekeeper)
+            raw_roll = extract_roll(prompt)
             
-            # The narrative config MUST be updated with the final system instruction for the duration of the game
-            final_narrative_config = GenerateContentConfig(
-                system_instruction=st.session_state["final_system_instruction"]
-            )
-            
-            # =========================================================================
-            # A) LOGIC CHECK (IF A ROLL IS DETECTED)
-            # =========================================================================
-            if raw_roll is not None:
-                st.info(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
-                
-                logic_prompt = f"""
-                RESOLVE A PLAYER ACTION:
-                1. Character Stats (JSON): {json.dumps(active_char)}
-                2. Player Action: "{prompt}"
-                3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20). 
-                4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
-                5. Return ONLY the JSON object following the SkillCheckResolution schema.
-                """
-                
-                try:
-                    # 1st API Call: Logic Call (Forced JSON Output)
-                    logic_response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=logic_prompt,
-                        config=skill_check_config
+            # --- Start Assistant Response ---
+            with st.chat_message("assistant"):
+                with st.spinner("The DM is thinking..."):
+                    
+                    final_response_text = ""
+                    
+                    final_narrative_config = GenerateContentConfig(
+                        system_instruction=st.session_state["final_system_instruction"]
                     )
                     
-                    skill_check_outcome = json.loads(logic_response.text)
+                    # =========================================================================
+                    # A) LOGIC CHECK (IF A ROLL IS DETECTED)
+                    # =========================================================================
+                    if raw_roll is not None:
+                        st.info(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
+                        
+                        logic_prompt = f"""
+                        RESOLVE A PLAYER ACTION:
+                        1. Character Stats (JSON): {json.dumps(active_char)}
+                        2. Player Action: "{prompt}"
+                        3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20). 
+                        4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
+                        5. Return ONLY the JSON object following the SkillCheckResolution schema.
+                        """
+                        
+                        try:
+                            # 1st API Call: Logic Call (Forced JSON Output)
+                            logic_response = client.models.generate_content(
+                                model='gemini-2.5-flash',
+                                contents=logic_prompt,
+                                config=skill_check_config
+                            )
+                            
+                            skill_check_outcome = json.loads(logic_response.text)
+                            
+                            # Display the mechanical result
+                            st.toast(f"Result: {skill_check_outcome['outcome_result']} (Roll: {skill_check_outcome['total_roll']} vs DC: {skill_check_outcome['difficulty_class']})")
+                            
+                            # Prepare the follow-up narrative prompt
+                            follow_up_prompt = f"""
+                            The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
+                            1. Narrate the vivid, descriptive consequence of this result.
+                            2. Update the scene based on the outcome and ask the player what they do next.
+                            """
+                            
+                            # Add the JSON resolution and follow-up prompt to history for the final narrative call
+                            st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
+                            st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
+
+                        except Exception as e:
+                            st.error(f"Logic Call Failed: {e}")
+                            st.session_state["history"].pop() # Remove the user prompt that caused the failure
+
+
+                    # =========================================================================
+                    # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
+                    # =========================================================================
                     
-                    # Display the mechanical result
-                    st.toast(f"Result: {skill_check_outcome['outcome_result']} (Roll: {skill_check_outcome['total_roll']} vs DC: {skill_check_outcome['difficulty_class']})")
-                    
-                    # Prepare the follow-up narrative prompt
-                    follow_up_prompt = f"""
-                    The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
-                    1. Narrate the vivid, descriptive consequence of this result.
-                    2. Update the scene based on the outcome and ask the player what they do next.
-                    """
-                    
-                    # Add the JSON resolution and follow-up prompt to history for the final narrative call
-                    st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
-                    st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
-
-                except Exception as e:
-                    st.error(f"Logic Call Failed: {e}")
-                    st.session_state["history"].pop() # Remove the user prompt that caused the failure
+                    try:
+                        # Use the entire conversation history (including the final prompt/JSON for continuity)
+                        narrative_response = client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=get_api_contents(st.session_state["history"]),
+                            config=final_narrative_config
+                        )
+                        final_response_text = narrative_response.text
+                        
+                    except Exception as e:
+                        final_response_text = f"Narrative API Error. The system may need to be restarted: {e}"
 
 
-            # =========================================================================
-            # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
-            # =========================================================================
-            
-            try:
-                # Use the entire conversation history (including the final prompt/JSON for continuity)
-                narrative_response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=get_api_contents(st.session_state["history"]),
-                    config=final_narrative_config
-                )
-                final_response_text = narrative_response.text
-                
-            except Exception as e:
-                final_response_text = f"Narrative API Error. The system may need to be restarted: {e}"
+                    # 4. Display the DM's final response
+                    st.markdown(final_response_text)
 
-
-            # 4. Display the DM's final response
-            st.markdown(final_response_text)
-
-            # 5. Update history with the DM's final response (if successful)
-            if not final_response_text.startswith("Narrative API Error"):
-                st.session_state["history"].append({"role": "assistant", "content": final_response_text})
+                    # 5. Update history with the DM's final response (if successful)
+                    if not final_response_text.startswith("Narrative API Error"):
+                        st.session_state["history"].append({"role": "assistant", "content": final_response_text})
