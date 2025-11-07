@@ -94,6 +94,7 @@ def get_api_contents(history_list):
     contents = []
     for msg in history_list:
         if msg["content"] and isinstance(msg["content"], str):
+            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
@@ -184,8 +185,8 @@ def start_adventure(setting, genre):
             # Reset history and start with the DM's introduction
             st.session_state["history"] = []
             st.session_state["history"].append({"role": "assistant", "content": response.text})
-            st.session_state["adventure_started"] = True
-            st.rerun() 
+            st.session_state["adventure_started"] = True # Mark the game as started
+            st.rerun() # Rerun to show the new history
 
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
@@ -387,10 +388,14 @@ with col_stats:
 with col_chat:
     st.header("The Story Log")
     
+    # 1. Create a placeholder container for the dynamic chat log
+    chat_container = st.container()
+
     # Display the conversation history in reverse order (newest on top)
-    for message in reversed(st.session_state["history"]):
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    with chat_container:
+        for message in reversed(st.session_state["history"]):
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
 
     # --- User Input and API Call Logic (Only active when adventure has started) ---
