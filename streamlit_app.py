@@ -4,6 +4,7 @@ import json
 from google import genai
 # We import all necessary types directly to avoid the 'client.types' error
 from google.genai.types import Content, Part, GenerateContentConfig
+from pydantic import BaseModel, Field
 
 # --- Configuration (Based on all previous steps) ---
 
