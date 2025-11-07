@@ -3,7 +3,6 @@ import os
 import json
 import re
 from google import genai
-# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -139,7 +138,7 @@ def create_new_character(setting, genre, player_name):
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
             if not st.session_state["current_player"]:
-                 st.session_state["current_player"] = player_name
+                st.session_state["current_player"] = player_name
             
             st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
             st.rerun() # Rerun to update the player selector
@@ -193,13 +192,57 @@ def start_adventure(setting, genre):
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
 
+def save_game():
+    """Saves the essential game state to Streamlit's file system as JSON."""
+    if not st.session_state["adventure_started"]:
+        st.warning("Adventure must be started to save game.")
+        return
+
+    game_state = {
+        "history": st.session_state["history"],
+        "characters": st.session_state["characters"],
+        "system_instruction": st.session_state["final_system_instruction"],
+        "current_player": st.session_state["current_player"],
+        "adventure_started": st.session_state["adventure_started"],
+        # Save genre/setting choices for display on load
+        "setting": st.session_state["setup_setting"], 
+        "genre": st.session_state["setup_genre"],
+    }
+    
+    # Simple (non-persistent) way to store the JSON data in Streamlit's file system for download/upload
+    st.session_state["saved_game_json"] = json.dumps(game_state, indent=2)
+    st.success("Game state saved to memory. Use the Download button to secure your file!")
+
+def load_game(uploaded_file):
+    """Loads game state from an uploaded file."""
+    if uploaded_file is not None:
+        try:
+            bytes_data = uploaded_file.read()
+            loaded_data = json.loads(bytes_data)
+
+            # Restore the session state
+            st.session_state["history"] = loaded_data["history"]
+            st.session_state["characters"] = loaded_data["characters"]
+            st.session_state["final_system_instruction"] = loaded_data["system_instruction"]
+            st.session_state["current_player"] = loaded_data["current_player"]
+            st.session_state["adventure_started"] = loaded_data["adventure_started"]
+            
+            # Restore settings for display
+            st.session_state["setup_setting"] = loaded_data.get("setting", "Post-Apocalypse")
+            st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
+            
+            st.success("Adventure successfully loaded!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
+
 
 # --- Streamlit UI Setup ---
 
 st.set_page_config(layout="wide")
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
-# --- Initialize Session State (FINAL CHECK) ---
+# --- Initialize Session State ---
 if "history" not in st.session_state:
     st.session_state["history"] = []
 if "characters" not in st.session_state:
@@ -212,6 +255,8 @@ if "new_player_name" not in st.session_state:
     st.session_state["new_player_name"] = "" 
 if "adventure_started" not in st.session_state:
     st.session_state["adventure_started"] = False
+if "saved_game_json" not in st.session_state:
+    st.session_state["saved_game_json"] = ""
 
 
 # --- Define the three columns ---
@@ -241,16 +286,37 @@ with col_settings:
         
         # Display roster summary
         if st.session_state["characters"]:
-             st.markdown(f"**Party:** {', '.join(st.session_state['characters'].keys())}")
+             st.markdown(f"**Party ({len(st.session_state['characters'])}):** {', '.join(st.session_state['characters'].keys())}")
 
     # START ADVENTURE BUTTON (Bottom of Left Column)
+    st.markdown("---")
     if not game_started and st.session_state["current_player"]:
          st.button("🚀 START ADVENTURE", 
                    on_click=lambda: start_adventure(selected_setting, selected_genre), 
                    type="primary")
     elif game_started:
-         st.markdown("---")
          st.markdown("Adventure in Progress!")
+         
+    st.markdown("---")
+    st.subheader("Save/Load")
+    
+    # Save Button
+    if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
+        pass # Function called on_click
+    
+    # Download Button (only appears after save_game is run)
+    if st.session_state["saved_game_json"]:
+         st.download_button(
+             label="Download Game File",
+             data=st.session_state["saved_game_json"],
+             file_name="gemini_rpg_save.json",
+             mime="application/json",
+         )
+
+    # Load Button/Uploader
+    uploaded_file = st.file_uploader("Load Adventure File", type="json")
+    if uploaded_file is not None and st.button("Load"):
+        load_game(uploaded_file)
 
 
 # =========================================================================
@@ -295,8 +361,8 @@ with col_stats:
 with col_chat:
     st.header("The Story Log")
     
-    # Display the conversation history
-    for message in st.session_state["history"]:
+    # Display the conversation history in reverse order (newest on top)
+    for message in reversed(st.session_state["history"]):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
