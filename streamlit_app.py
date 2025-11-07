@@ -3,6 +3,7 @@ import os
 import json
 import re
 from google import genai
+# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -29,10 +30,12 @@ SETTINGS_OPTIONS = {
     "Classic Fantasy": ["High Magic Quest", "Gritty Dungeon Crawl", "Political Intrigue"],
     "Post-Apocalypse": ["Mutant Survival", "Cybernetic Wasteland", "Resource Scarcity"],
     "Cyberpunk": ["Corporate Espionage", "Street Gang Warfare", "AI Revolution"],
+    "Modern Fantasy": ["Urban Occult Detective", "Hidden Magic Conspiracy", "Campus Supernatural Drama"],
+    "Horror": ["Cosmic Dread (Lovecraftian)", "Slasher Survival", "Gothic Vampire Intrigue"],
+    "Spycraft": ["Cold War Espionage", "High-Tech Corporate Infiltration", "Shadowy Global Syndicate"],
 }
 
-# --- System Instruction Template ---
-# Uses placeholders for setting and genre
+# System Instruction Template - Set the core DM rules
 SYSTEM_INSTRUCTION_TEMPLATE = """
 You are the ultimate Dungeon Master (DM) and Storyteller, running a persistent TTRPG for {player_count} players in the **{setting}, {genre}** setting.
 Your tone must match the genre: be immersive, tense, and dramatic.
@@ -64,11 +67,11 @@ character_creation_config = GenerateContentConfig(
     response_schema=CharacterSheet,
 )
 
-# Define Skill Check Schema (Kept for completeness, though config is needed for full logic)
+# Define Skill Check Schema
 class SkillCheckResolution(BaseModel):
     """Structured data for resolving a single player action."""
     action: str = Field(description="The action the player attempted.")
-    attribute_used: str = Field(description="The core attribute used for the check.")
+    attribute_used: str = Field(description="The core attribute used for the check (e.g., 'Dexterity').")
     difficulty_class: int = Field(description="The DC set by the DM/Gemini.")
     player_d20_roll: int = Field(description="The raw D20 roll the player provided.")
     attribute_modifier: int = Field(description="The modifier used in the calculation.")
@@ -77,6 +80,7 @@ class SkillCheckResolution(BaseModel):
     hp_change: int = Field(description="Damage taken or health gained. Default 0.", default=0)
     consequence_narrative: str = Field(description="A brief description of the immediate mechanical consequence.")
 
+# Define Skill Check Configuration
 skill_check_config = GenerateContentConfig(
     response_mime_type="application/json",
     response_schema=SkillCheckResolution,
@@ -94,26 +98,30 @@ def get_api_contents(history_list):
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
-def create_new_character(setting, genre):
+def create_new_character(setting, genre, player_name):
     """Function to call the API and create a character JSON."""
     
+    # Check if name is provided and unique
+    if not player_name or player_name in st.session_state["characters"]:
+        st.error("Please enter a unique name for the new character.")
+        return
+
     # 1. Update the System Instruction with the user's choices
     final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
         setting=setting,
         genre=genre,
-        player_count=1 # Simplified for now
+        player_count=len(st.session_state["characters"]) + 1 # Dynamic player count
     )
     
-    # 2. Define the character creation prompt
     creation_prompt = f"""
-    Based on the setting: {setting} and the genre: {genre}, create a starting character.
+    Based on the setting: {setting} and the genre: {genre}, create a starting character named {player_name}.
     The character should be balanced, attribute modifiers should range from -1 to +3, starting HP should be 20, and Morale/Sanity must start at 100.
     Fill in ALL fields in the required JSON schema.
     """
 
-    with st.spinner(f"Creating a survivor for {genre}..."):
+    with st.spinner(f"Creating survivor {player_name} for {genre}..."):
         try:
-            # We use the narrative config logic here but point the instruction to the dynamic one
+            # We pass the dynamically created system instruction for the character creation call
             temp_config = GenerateContentConfig(
                 system_instruction=final_system_instruction
             )
@@ -124,23 +132,20 @@ def create_new_character(setting, genre):
                 config=character_creation_config
             )
             char_data = json.loads(char_response.text)
+            char_data['name'] = player_name # Ensure the name is exactly what the user input
 
-            # Store the final system instruction for the rest of the game session
+            # Store the character and set the active player
             st.session_state["final_system_instruction"] = final_system_instruction
+            st.session_state["characters"][player_name] = char_data
+            st.session_state["current_player"] = player_name
             
-            # Store the character in the dictionary under its name
-            st.session_state["characters"][char_data['name']] = char_data
-            st.session_state["current_player"] = char_data['name']
-            
-            # Start history with the DM's introduction
-            st.session_state["history"].append({"role": "assistant", "content": f"Welcome, {char_data['name']}! Your journey begins in the {setting} world of {genre}. What is your first move?"})
+            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} is ready! Welcome. You are the active player."})
 
         except Exception as e:
-            st.error(f"Character creation failed: {e}. Please check the logs.")
+            st.error(f"Character creation failed for {player_name}: {e}. Try a simpler name.")
 
-
-# Helper function to extract a potential roll
 def extract_roll(text):
+    """Helper function to extract a number (1-20) indicating a dice roll."""
     # Searches for a number between 1 and 20 near keywords like 'roll' or 'try'
     match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
     if match and 1 <= int(match.group(2)) <= 20:
@@ -167,11 +172,43 @@ if "final_system_instruction" not in st.session_state:
 # --- Sidebar (Settings, Character Sheet & Controls) ---
 st.sidebar.header("Game Settings")
 
-selected_setting = st.sidebar.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), disabled=bool(st.session_state["current_player"]))
-selected_genre = st.sidebar.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], disabled=bool(st.session_state["current_player"]))
+game_started = bool(st.session_state["current_player"])
+selected_setting = st.sidebar.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), disabled=game_started)
+selected_genre = st.sidebar.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], disabled=game_started)
 
 
-st.sidebar.header("Active Player Sheet")
+st.sidebar.header("Roster & Controls")
+
+# Input field for new character name
+new_player_name = st.sidebar.text_input("New Player Name", key="new_player_name", disabled=game_started and st.session_state["new_player_name"] == "")
+
+# Character Creation Button: Requires a name and calls the updated function
+if st.sidebar.button("Add Character to Game", disabled=game_started and not new_player_name):
+    # Pass the name from the input field
+    create_new_character(selected_setting, selected_genre, new_player_name)
+
+# Player Rotation Dropdown/Selector
+if st.session_state["characters"]:
+    player_options = list(st.session_state["characters"].keys())
+    
+    # Ensure current_player is in options, set initial index
+    if st.session_state["current_player"] in player_options:
+        default_index = player_options.index(st.session_state["current_player"])
+    else:
+        default_index = 0
+    
+    st.sidebar.selectbox(
+        "Active Player Turn",
+        player_options,
+        key="player_selector",
+        index=default_index
+    )
+    # Update current_player state based on selector
+    st.session_state["current_player"] = st.session_state["player_selector"]
+
+
+# Display Active Player Sheet (Uses the selected player)
+st.sidebar.header("Current Player Stats")
 active_char = st.session_state["characters"].get(st.session_state["current_player"])
 
 if active_char:
@@ -182,15 +219,14 @@ if active_char:
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Inventory:** " + ", ".join(active_char['inventory']))
 else:
-    st.sidebar.write("Start a new character to begin the game!")
-    with st.sidebar:
-        st.button("Start New Character", on_click=lambda: create_new_character(selected_setting, selected_genre))
+    st.sidebar.write("No characters created.")
 
 
 # --- Main Game Loop Display ---
 for message in st.session_state["history"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
 
 # --- User Input and API Call Logic ---
 prompt = st.chat_input("What do you do?")
@@ -201,10 +237,14 @@ if prompt:
         st.warning("Please create a character first!")
         st.stop()
     
-    # 2. Add user message to display and history
-    st.session_state["history"].append({"role": "user", "content": prompt})
+    current_player_name = st.session_state["current_player"]
+    active_char = st.session_state["characters"].get(current_player_name)
+    
+    # 2. Add user message to display and history (with player name prepended)
+    full_prompt = f"({current_player_name}'s Turn): {prompt}"
+    st.session_state["history"].append({"role": "user", "content": full_prompt})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(full_prompt)
 
     # 3. Action Detection (The Gatekeeper)
     raw_roll = extract_roll(prompt)
@@ -215,7 +255,7 @@ if prompt:
             
             final_response_text = ""
             
-            # Update narrative config for the API call using the final instruction template
+            # The narrative config MUST be updated with the final system instruction for the duration of the game
             final_narrative_config = GenerateContentConfig(
                 system_instruction=st.session_state["final_system_instruction"]
             )
@@ -224,7 +264,7 @@ if prompt:
             # A) LOGIC CHECK (IF A ROLL IS DETECTED)
             # =========================================================================
             if raw_roll is not None:
-                st.info(f"Skill Check Detected! Player roll: {raw_roll}")
+                st.info(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
                 
                 logic_prompt = f"""
                 RESOLVE A PLAYER ACTION:
@@ -250,7 +290,7 @@ if prompt:
                     
                     # Prepare the follow-up narrative prompt
                     follow_up_prompt = f"""
-                    The player's last risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
+                    The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
                     1. Narrate the vivid, descriptive consequence of this result.
                     2. Update the scene based on the outcome and ask the player what they do next.
                     """
@@ -260,7 +300,6 @@ if prompt:
                     st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
 
                 except Exception as e:
-                    # Fallback if the JSON parsing fails
                     st.error(f"Logic Call Failed: {e}")
                     st.session_state["history"].pop() # Remove the user prompt that caused the failure
 
