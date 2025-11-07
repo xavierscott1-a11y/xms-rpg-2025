@@ -2,14 +2,17 @@ import streamlit as st
 import os
 import json
 from google import genai
-# We import all necessary types directly to avoid the 'client.types' error
+# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
+import sys
+
 # --- Configuration (Based on all previous steps) ---
 
 # SECURITY: Loads the key from Streamlit Secrets (GEMINI_API_KEY)
 try:
+    # Use st.secrets to securely load the key you set up in the Streamlit Secrets editor
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except KeyError:
     st.error("API Key not found. Please ensure 'GEMINI_API_KEY' is set in Streamlit Secrets.")
@@ -35,9 +38,11 @@ narrative_config = GenerateContentConfig(
     system_instruction=SYSTEM_INSTRUCTION
 )
 
-# Define Character Sheet Schema (Needs to be defined even if not used explicitly below)
-# Note: Full schema attributes are omitted here for brevity, but you would include the full class definition here.
+# --- Schemas (Required for Structured Output) ---
+
+# Define Character Sheet Schema (Needs BaseModel and Field from Pydantic)
 class CharacterSheet(BaseModel):
+    """The full character data structure."""
     name: str = Field(description="The player's chosen name.")
     race_class: str = Field(description="The character's core identity.")
     str_mod: int = Field(description="Strength Modifier.")
@@ -101,11 +106,13 @@ if "character" not in st.session_state:
 # --- Sidebar (Character Sheet) ---
 st.sidebar.header("Character Sheet")
 if st.session_state["character"]:
-    st.sidebar.markdown(f"**Name:** {st.session_state['character']['name']}")
-    st.sidebar.markdown(f"**Class:** {st.session_state['character']['race_class']}")
-    st.sidebar.markdown(f"**HP:** {st.session_state['character']['current_hp']}")
-    st.sidebar.markdown(f"**Sanity:** {st.session_state['character']['morale_sanity']}")
-    st.sidebar.markdown("**Inventory:** " + ", ".join(st.session_state['character']['inventory']))
+    char = st.session_state["character"]
+    st.sidebar.markdown(f"**Name:** {char['name']}")
+    st.sidebar.markdown(f"**Class:** {char['race_class']}")
+    st.sidebar.markdown(f"**HP:** {char['current_hp']}")
+    st.sidebar.markdown(f"**Sanity:** {char['morale_sanity']}")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**Inventory:** " + ", ".join(char['inventory']))
 else:
     st.sidebar.write("Start a new character to begin the game!")
     # Add the button
@@ -126,7 +133,6 @@ if prompt:
     # 1. Check if character exists before allowing play
     if not st.session_state["character"]:
         st.warning("Please create a character first!")
-        # Clear the input so the user can re-enter
         st.stop()
 
     # 2. Add the user message to the display and history
@@ -134,24 +140,32 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Call the Gemini API (Simplified Narrative Call for now)
+    # 3. Call the Gemini API (Narrative Call)
     with st.chat_message("assistant"):
         with st.spinner("The DM is thinking..."):
             # Build the contents list for the API call
-            # We must convert the dictionary history to the specific Content/Part format
+            # This ensures only valid, non-empty messages are sent to the API
             contents = []
             for msg in st.session_state["history"]:
-                # FIX: Use the reliable Part(text=...) constructor
-                contents.append(Content(role=msg["role"], parts=[Part(text=msg["content"])]))
+                # FIX: Only add messages with actual content to prevent the API rejection (ClientError)
+                if msg["content"] and isinstance(msg["content"], str): 
+                    contents.append(Content(role=msg["role"], parts=[Part(text=msg["content"])]))
+            
+            try:
+                # The primary API call for narrative
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=narrative_config
+                )
 
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=contents,
-                config=narrative_config
-            )
+                # 4. Display the DM's response
+                st.markdown(response.text)
 
-            # 4. Display the DM's response
-            st.markdown(response.text)
-
-            # 5. Update history with the DM's response
-            st.session_state["history"].append({"role": "assistant", "content": response.text})
+                # 5. Update history with the DM's response
+                st.session_state["history"].append({"role": "assistant", "content": response.text})
+            
+            except Exception as e:
+                 st.error(f"Narrative API Error. Try clearing chat history: {e}")
+                 # Append a placeholder error message to history so the flow doesn't crash on next turn
+                 st.session_state["history"].append({"role": "assistant", "content": "Narrative call failed."})
