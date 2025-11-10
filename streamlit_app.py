@@ -8,7 +8,7 @@ from google import genai
 # Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List
 
 # --- Configuration (API Client Setup) ---
 
@@ -68,7 +68,6 @@ Your output must be pure, flowing narrative text. DO NOT include JSON unless spe
 
 # --- Schemas (Required for Structured Output) ---
 
-# Define Character Sheet Schema
 class CharacterSheet(BaseModel):
     """The full character data structure."""
     name: str = Field(description="The player's chosen name.")
@@ -84,13 +83,11 @@ class CharacterSheet(BaseModel):
     inventory: List[str] = Field(description="A list of 3-5 starting major gear items.")
     experience: int = Field(description="Starting experience points (always 0).")
 
-# Define Character Creation Configuration (base; will merge with system_instruction dynamically)
 character_creation_config = GenerateContentConfig(
     response_mime_type="application/json",
     response_schema=CharacterSheet,
 )
 
-# Define Skill Check Schema
 class SkillCheckResolution(BaseModel):
     """Structured data for resolving a single player action."""
     action: str = Field(description="The action the player attempted.")
@@ -103,7 +100,6 @@ class SkillCheckResolution(BaseModel):
     hp_change: int = Field(description="Damage taken or health gained. Default 0.", default=0)
     consequence_narrative: str = Field(description="Brief description of the immediate mechanical consequence.")
 
-# Define Skill Check Configuration (base; will merge with system_instruction dynamically)
 skill_check_config = GenerateContentConfig(
     response_mime_type="application/json",
     response_schema=SkillCheckResolution,
@@ -124,13 +120,10 @@ def get_api_contents(history_list):
 
 def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
-    
-    # Check if name is provided and unique
     if not player_name or player_name in st.session_state["characters"]:
         st.error("Please enter a unique name for the new character.")
         return
 
-    # 1. Update the System Instruction with the user's choices
     final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
         setting=setting,
         genre=genre,
@@ -150,22 +143,19 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
     
     with st.spinner(f"Creating survivor {player_name} for {genre}..."):
         try:
-            # Merge system instruction with schema for this call
             char_config = GenerateContentConfig(
                 system_instruction=final_system_instruction,
                 response_mime_type="application/json",
                 response_schema=CharacterSheet,
             )
-            
             char_response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=creation_prompt,
                 config=char_config
             )
             char_data = json.loads(char_response.text)
-            char_data['name'] = player_name  # Ensure the name is exactly what the user input
+            char_data['name'] = player_name  # ensure exact user input
 
-            # Store the character and set the active player if this is the first one
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
             if not st.session_state["current_player"]:
@@ -177,9 +167,8 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             st.error(f"Character creation failed for {player_name}: {e}. Try again in a moment.")
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
-    # --- FINAL CLEANUP AND RERUN ---
-    st.session_state["new_player_name_input_setup_value"] = ""  # Clear input helper
-    st.session_state["custom_character_description"] = ""  # Clear description
+    st.session_state["new_player_name_input_setup_value"] = ""
+    st.session_state["custom_character_description"] = ""
     st.rerun() 
 
 
@@ -216,18 +205,16 @@ def start_adventure(setting, genre):
             final_narrative_config = GenerateContentConfig(
                 system_instruction=st.session_state["final_system_instruction"]
             )
-            
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=intro_prompt,
                 config=final_narrative_config
             )
-            
             st.session_state["history"] = []
             st.session_state["history"].append({"role": "assistant", "content": response.text})
-            st.session_state["adventure_started"] = True  # Mark the game as started
-            st.session_state["page"] = "GAME"  # Switch page to Game View
-            st.rerun()  # Rerun to show the new history
+            st.session_state["adventure_started"] = True
+            st.session_state["page"] = "GAME"
+            st.rerun()
 
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
@@ -244,7 +231,6 @@ def save_game():
         "system_instruction": st.session_state["final_system_instruction"],
         "current_player": st.session_state["current_player"],
         "adventure_started": st.session_state["adventure_started"],
-        # Save widget values to restore the UI
         "setting": st.session_state["setup_setting"], 
         "genre": st.session_state["setup_genre"],
         "difficulty": st.session_state["setup_difficulty"],
@@ -261,12 +247,11 @@ def load_game(uploaded_file):
             bytes_data = uploaded_file.read()
             loaded_data = json.loads(bytes_data)
 
-            # Store data in staging variables to avoid the modification error
             st.session_state["__LOAD_DATA__"] = loaded_data
             st.session_state["__LOAD_FLAG__"] = True
             
             st.success("Adventure loaded successfully! Restarting session...")
-            st.rerun()  # Force a rerun to apply the staged data
+            st.rerun()
 
         except Exception as e:
             st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
@@ -274,24 +259,20 @@ def load_game(uploaded_file):
 
 # --- Check for Staged Load Data (Runs BEFORE Widgets are created) ---
 if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
-    
     loaded_data = st.session_state["__LOAD_DATA__"]
 
-    # Apply data directly to session state before any widgets are rendered
     st.session_state["history"] = loaded_data["history"]
     st.session_state["characters"] = loaded_data["characters"]
     st.session_state["final_system_instruction"] = loaded_data["system_instruction"]
     st.session_state["current_player"] = loaded_data["current_player"]
     st.session_state["adventure_started"] = loaded_data["adventure_started"]
     
-    # Restore settings by setting the initial values for the selectboxes' keys
     st.session_state["setup_setting"] = loaded_data.get("setting", "Post-Apocalypse")
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
     st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
-    st.session_state["page"] = "GAME"  # Force game page after load
+    st.session_state["page"] = "GAME"
     
-    # Clear the staging variables
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
 
@@ -319,13 +300,13 @@ if "__LOAD_FLAG__" not in st.session_state:
     st.session_state["__LOAD_FLAG__"] = False
 if "__LOAD_DATA__" not in st.session_state:
     st.session_state["__LOAD_DATA__"] = None
-if "page" not in st.session_state:  # New page management flag
+if "page" not in st.session_state:
     st.session_state["page"] = "SETUP" 
 if "custom_setting_description" not in st.session_state:
     st.session_state["custom_setting_description"] = "" 
 if "custom_character_description" not in st.session_state:
     st.session_state["custom_character_description"] = "" 
-if "new_player_name_input_setup_value" not in st.session_state:  # Used to reset input field
+if "new_player_name_input_setup_value" not in st.session_state:
     st.session_state["new_player_name_input_setup_value"] = ""
 
 
@@ -334,7 +315,6 @@ if "new_player_name_input_setup_value" not in st.session_state:  # Used to reset
 # =========================================================================
 
 if st.session_state["page"] == "SETUP":
-    
     st.header("1. Define Your Campaign World")
     
     col_world_settings, col_world_description = st.columns([1, 2])
@@ -344,18 +324,15 @@ if st.session_state["page"] == "SETUP":
         selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
         selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], key="setup_genre")
         
-        # Difficulty selection
         st.subheader("Difficulty")
         selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
         st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
         
-        # Load Game moved here
         st.markdown("---")
         st.subheader("Load Existing Game")
         uploaded_file = st.file_uploader("Load Adventure File", type="json")
         if uploaded_file is not None and st.button("Load"):
             load_game(uploaded_file)
-
 
     with col_world_description:
         st.subheader("Custom World Details")
@@ -374,15 +351,10 @@ if st.session_state["page"] == "SETUP":
 
     with col_char_creation:
         st.subheader("New Character")
-        
-        # Class selection dropdown (dynamic based on setting)
         selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
         selected_class = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
-        
-        # Character Name input uses the session state value for proper resetting
         new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
-        # Display roster summary
         if st.session_state["characters"]:
             st.markdown(f"**Party Roster ({len(st.session_state['characters'])}):**")
             st.markdown(f"{', '.join(st.session_state['characters'].keys())}")
@@ -398,18 +370,17 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]:  # ONLY require a name
+        if st.session_state["new_player_name_input_setup"]:
             create_new_character_handler(
                 st.session_state["setup_setting"], 
                 st.session_state["setup_genre"], 
                 st.session_state["new_player_name_input_setup"],
-                st.session_state["setup_class"],  # Pass the selected class
+                st.session_state["setup_class"],
                 st.session_state["custom_character_description"],
-                st.session_state["setup_difficulty"]  # Pass the selected difficulty
+                st.session_state["setup_difficulty"]
             )
         else:
             st.error("Please provide a Character Name.")
-
 
     st.markdown("---")
     st.header("3. Start Game")
@@ -425,19 +396,13 @@ if st.session_state["page"] == "SETUP":
 # =========================================================================
 
 elif st.session_state["page"] == "GAME":
-    
-    # --- Define the two main columns (Center Chat + Right Stats) ---
-    col_chat = st.container() 
-    
+    # Single main container for chat
+    col_chat = st.container()
     game_started = st.session_state["adventure_started"]
 
-    # ---------------------------------------------------------------------
-    # NATIVE STREAMLIT SIDEBAR (Controls - FIXED/SCROLLABLE)
-    # ---------------------------------------------------------------------
+    # ---------------------- SIDEBAR CONTROLS ----------------------
     with st.sidebar:
         st.header("Game Controls")
-        
-        # Game Details Expander
         with st.expander("World & Difficulty", expanded=False):
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
             st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
@@ -445,10 +410,8 @@ elif st.session_state["page"] == "GAME":
         
         st.markdown("---")
         st.subheader("Save/Load")
-        
         if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
             pass 
-        
         if st.session_state["saved_game_json"]:
             st.download_button(
                 label="Download Game File",
@@ -456,18 +419,16 @@ elif st.session_state["page"] == "GAME":
                 file_name="gemini_rpg_save.json",
                 mime="application/json",
             )
-    # ---------------------------------------------------------------------
 
-    # =========================================================================
-    # RIGHT COLUMN (Active Player Stats - RENDERED IN MAIN BODY)
-    # =========================================================================
-    with col_stats:
-        with st.container(border=True):
-            st.header("Active Player Stats")
-            
+        # ---- Active Player Stats moved here as a collapsible bar ----
+        st.markdown("---")
+        with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
                 player_options = list(st.session_state["characters"].keys())
-                default_index = player_options.index(st.session_state["current_player"]) if st.session_state["current_player"] in player_options else 0
+                default_index = (
+                    player_options.index(st.session_state["current_player"])
+                    if st.session_state["current_player"] in player_options else 0
+                )
 
                 def _on_player_change():
                     st.session_state["current_player"] = st.session_state["player_selector"]
@@ -478,70 +439,48 @@ elif st.session_state["page"] == "GAME":
                     player_options,
                     key="player_selector",
                     index=default_index,
-                    disabled=not game_started,  # Disable switching during core narrative responses
+                    disabled=not game_started,
                     on_change=_on_player_change
                 )
 
-                # Compute active_char AFTER any potential change above
                 active_char = st.session_state["characters"].get(st.session_state["current_player"])
-                
                 st.markdown("---")
-                
-                # Display stats
                 if active_char:
-                    st.subheader(active_char['name'])
+                    st.markdown(f"**Name:** {active_char['name']}")
                     st.markdown(f"**Class:** {active_char['race_class']}")
                     st.markdown(f"**HP:** {active_char['current_hp']}")
                     st.markdown(f"**Sanity/Morale:** {active_char['morale_sanity']}")
-                    st.markdown("---")
                     st.markdown("**Inventory:** " + ", ".join(active_char['inventory']))
             else:
-                st.write("No characters created.")
+                st.info("No characters created yet.")
 
-
-    # =========================================================================
-    # LEFT COLUMN (Game Chat - FILLS MOST OF THE SCREEN)
-    # =========================================================================
+    # ---------------------- MAIN CHAT AREA ----------------------
     with col_chat:
         st.header("The Story Log")
-        
-        # Display the conversation history in reverse order (newest on top)
         for message in reversed(st.session_state["history"]):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # =========================================================================
-    # GLOBAL INPUT BOX (Fixed to the bottom of the page structure)
-    # =========================================================================
+    # ---------------------- INPUT AREA ----------------------
     if game_started:
         prompt = st.chat_input("What do you do?")
-
         if prompt:
-            # 1. Add user message to display and history (with player name prepended)
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
-            
             full_prompt = f"({current_player_name}'s Turn): {prompt}"
             st.session_state["history"].append({"role": "user", "content": full_prompt})
             
-            # --- Start Assistant Response ---
             with st.spinner("The DM is thinking..."):
-                
                 final_response_text = ""
-                
                 final_narrative_config = GenerateContentConfig(
                     system_instruction=st.session_state["final_system_instruction"]
                 )
                 
-                # 2. Action Detection (The Gatekeeper)
                 raw_roll = extract_roll(prompt)
 
-                # =========================================================================
-                # A) LOGIC CHECK (IF A ROLL IS DETECTED)
-                # =========================================================================
+                # ----- Logic call if a roll is detected -----
                 if raw_roll is not None:
                     st.toast(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
-                    
                     logic_prompt = f"""
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
@@ -550,30 +489,24 @@ elif st.session_state["page"] == "GAME":
                     4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
                     5. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
-                    
                     try:
-                        # Include system instruction + schema for logic call
                         logic_config = GenerateContentConfig(
                             system_instruction=st.session_state["final_system_instruction"],
                             response_mime_type="application/json",
                             response_schema=SkillCheckResolution,
                         )
-
                         logic_response = client.models.generate_content(
                             model='gemini-2.5-flash',
                             contents=logic_prompt,
                             config=logic_config
                         )
-                        
                         skill_check_outcome = json.loads(logic_response.text)
-                        
-                        # Prepare display values
+
                         roll = skill_check_outcome.get('player_d20_roll', 'N/A')
                         mod = skill_check_outcome.get('attribute_modifier', 'N/A')
                         total = skill_check_outcome.get('total_roll', 'N/A')
                         dc = skill_check_outcome.get('difficulty_class', 'N/A')
                         
-                        # Pure HTML combat display
                         combat_display = f"""
                         <div style="border:2px solid #2e7d32;padding:10px;border-radius:8px;background-color:#1e1e1e;color:#ffffff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
                           <div style="font-weight:700;margin-bottom:6px;">{skill_check_outcome['outcome_result'].upper()}! ({skill_check_outcome['attribute_used']} Check)</div>
@@ -584,26 +517,20 @@ elif st.session_state["page"] == "GAME":
                         st.markdown(combat_display, unsafe_allow_html=True)
                         st.toast(f"Result: {skill_check_outcome['outcome_result']}")
                         
-                        # Follow-up narrative prompt
                         follow_up_prompt = f"""
                         The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
                         1. Narrate the vivid, descriptive consequence of this result.
                         2. Update the scene based on the outcome and ask the player what they do next.
                         """
-                        
-                        # Add the JSON resolution and follow-up prompt to history for the final narrative call
                         st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
                         st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
 
                     except Exception as e:
                         st.error(f"Logic Call Failed: {e}")
-                        # Remove only the last user prompt if appropriate
                         if st.session_state["history"] and st.session_state["history"][-1]["role"] == "user":
                             st.session_state["history"].pop()
 
-                # =========================================================================
-                # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
-                # =========================================================================
+                # ----- Narrative call (always) -----
                 try:
                     narrative_response = client.models.generate_content(
                         model='gemini-2.5-flash',
@@ -611,13 +538,10 @@ elif st.session_state["page"] == "GAME":
                         config=final_narrative_config
                     )
                     final_response_text = narrative_response.text
-                    
                 except Exception as e:
                     final_response_text = f"Narrative API Error: {e}"
 
-                # 3. Update history with the DM's final response
                 if not final_response_text.startswith("Narrative API Error"):
                     st.session_state["history"].append({"role": "assistant", "content": final_response_text})
                 
-                # Force a final rerun to display the response and clear the input box
                 st.rerun()
