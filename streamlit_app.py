@@ -428,6 +428,7 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the two main columns (Center Chat + Right Stats) ---
+    # The native sidebar handles the controls and is fixed/scrollable.
     col_chat, col_stats = st.columns([5, 3]) 
     
     game_started = st.session_state["adventure_started"]
@@ -453,6 +454,7 @@ elif st.session_state["page"] == "GAME":
                 file_name="gemini_rpg_save.json",
                 mime="application/json",
             )
+    # ---------------------------------------------------------------------
 
     # =========================================================================
     # RIGHT COLUMN (Active Player Stats - FIXED VISUAL)
