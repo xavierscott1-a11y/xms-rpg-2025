@@ -409,54 +409,47 @@ if st.session_state["page"] == "SETUP":
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
         st.button("🚀 START ADVENTURE", 
-                   on_click=lambda: start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"]), 
+                   on_on_click=lambda: start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"]), 
                    type="primary")
     else:
         st.warning("Create at least one character to start.")
 
 # =========================================================================
-# PAGE 2: GAME VIEW (THREE COLUMNS)
+# PAGE 2: GAME VIEW (Main Application)
 # =========================================================================
 
 elif st.session_state["page"] == "GAME":
     
     # --- Define the three columns ---
-    # NOTE: The visual height of the containers is what makes the UI scrollable and separated.
-    col_settings, col_chat, col_stats = st.columns([2, 5, 3])
-
+    col_chat, col_stats = st.columns([5, 3]) # Center + Right Column
+    
     game_started = st.session_state["adventure_started"]
+    
+    # ---------------------------------------------------------------------
+    # NATIVE STREAMLIT SIDEBAR (For Settings and persistent visibility)
+    # ---------------------------------------------------------------------
+    with st.sidebar:
+        st.header("Game Details")
+        st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+        st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
+        st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
+        st.markdown("---")
+        st.subheader("Save/Load")
+        
+        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
+            pass 
+        
+        if st.session_state["saved_game_json"]:
+            st.download_button(
+                label="Download Game File",
+                data=st.session_state["saved_game_json"],
+                file_name="gemini_rpg_save.json",
+                mime="application/json",
+            )
+    # ---------------------------------------------------------------------
 
     # =========================================================================
-    # LEFT COLUMN (Settings & Controls)
-    # =========================================================================
-    with col_settings:
-        with st.container(border=True):
-            st.header("Game Details")
-            st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
-            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
-            st.markdown(f"**Details:** {st.session_state.get('custom_setting_description')}")
-            st.markdown("---")
-            st.subheader("Roster")
-            if st.session_state["characters"]:
-                st.markdown(f"**Party ({len(st.session_state['characters'])}):** {', '.join(st.session_state['characters'].keys())}")
-
-            # Save/Load Functionality
-            st.markdown("---")
-            st.subheader("Save/Load")
-            
-            if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
-                pass 
-            
-            if st.session_state["saved_game_json"]:
-                st.download_button(
-                    label="Download Game File",
-                    data=st.session_state["saved_game_json"],
-                    file_name="gemini_rpg_save.json",
-                    mime="application/json",
-                )
-
-    # =========================================================================
-    # RIGHT COLUMN (Active Player Stats)
+    # RIGHT COLUMN (Active Player Stats - FIXED VISUAL)
     # =========================================================================
     with col_stats:
         with st.container(border=True):
@@ -492,7 +485,7 @@ elif st.session_state["page"] == "GAME":
 
 
     # =========================================================================
-    # CENTER COLUMN (Game Chat and Logic)
+    # LEFT COLUMN (Game Chat - FILLS MOST OF THE SCREEN)
     # =========================================================================
     with col_chat:
         st.header("The Story Log")
