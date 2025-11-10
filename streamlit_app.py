@@ -8,15 +8,13 @@ from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 
-# ---- Style: widen sidebar (~10% more than before) ----
+# ---- Style: wider sidebar for the sheet ----
 _SIDEBAR_CSS = """
 <style>
-/* Wider sidebar for the character sheet */
 [data-testid="stSidebar"] { width: 480px; min-width: 480px; }
 @media (max-width: 1200px) {
   [data-testid="stSidebar"] { width: 410px; min-width: 410px; }
 }
-/* Tighten expander body spacing a bit */
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 </style>
 """
@@ -60,6 +58,46 @@ DIFFICULTY_OPTIONS = {
     "Easy (Narrative Focus)": "DC scaling is generous (max DC 15). Combat is forgiving. Puzzles are simple.",
     "Normal (Balanced)": "Standard DC scaling (max DC 20). Balanced lethality. Moderate puzzles.",
     "Hard (Lethal)": "DC scaling is brutal (max DC 25+). Critical failures are common. High chance of character death.",
+}
+
+# --- Races per setting + stat modifiers ---
+RACE_OPTIONS = {
+    "Classic Fantasy": ["Human", "Elf", "Dwarf", "Halfling", "Orc", "Tiefling"],
+    "Post-Apocalypse": ["Human", "Mutant", "Android", "Cyborg", "Beastkin", "Ghoul"],
+    "Cyberpunk": ["Human", "Cyborg", "Augmented", "Synth", "Clone"],
+    "Modern Fantasy": ["Human", "Fae-touched", "Vampire", "Werewolf", "Mageborn"],
+    "Horror": ["Human", "Occultist", "Touched", "Fragmented"],
+    "Spycraft": ["Human"],  # grounded setting
+}
+
+# Baseline, setting-agnostic examples. Feel free to expand.
+# Modifiers are added to the character's *_mod fields at creation time.
+RACE_MODIFIERS = {
+    "Human":       {"str_mod": 0, "dex_mod": 0, "con_mod": 0, "int_mod": 0, "wis_mod": 0, "cha_mod": 0},
+    "Elf":         {"dex_mod": 1, "int_mod": 1, "con_mod": -1},
+    "Dwarf":       {"con_mod": 2, "cha_mod": -1},
+    "Halfling":    {"dex_mod": 1, "str_mod": -1},
+    "Orc":         {"str_mod": 2, "int_mod": -1, "cha_mod": -1},
+    "Tiefling":    {"cha_mod": 1, "int_mod": 1, "wis_mod": -1},
+
+    "Mutant":      {"con_mod": 1, "str_mod": 1, "cha_mod": -1},
+    "Android":     {"int_mod": 2, "wis_mod": -1},
+    "Cyborg":      {"str_mod": 1, "con_mod": 1, "dex_mod": -1},
+    "Beastkin":    {"dex_mod": 1, "wis_mod": 1, "int_mod": -1},
+    "Ghoul":       {"con_mod": 1, "cha_mod": -2},
+
+    "Augmented":   {"dex_mod": 1, "int_mod": 1, "wis_mod": -1},
+    "Synth":       {"int_mod": 2, "cha_mod": -1},
+    "Clone":       {"wis_mod": 1, "cha_mod": -1},
+
+    "Fae-touched": {"cha_mod": 1, "wis_mod": 1, "con_mod": -1},
+    "Vampire":     {"cha_mod": 1, "str_mod": 1, "con_mod": -1},
+    "Werewolf":    {"str_mod": 2, "int_mod": -1},
+    "Mageborn":    {"int_mod": 2, "str_mod": -1},
+
+    "Occultist":   {"int_mod": 1, "wis_mod": 1, "con_mod": -1},
+    "Touched":     {"wis_mod": 2, "cha_mod": -1},
+    "Fragmented":  {"int_mod": 1, "cha_mod": -1},
 }
 
 SYSTEM_INSTRUCTION_TEMPLATE = """
@@ -138,7 +176,7 @@ SLOT_LABEL = {
 _WEAPON_WORDS = [
     "sword","dagger","axe","mace","spear","bow","crossbow","staff","club",
     "blade","hammer","sabre","saber","rapier","longsword","shortsword","katana",
-    "pistol","rifle","shotgun","smg","revolver","gun"
+    "pistol","rifle","shotgun","smg","revolver","gun","greataxe","greatsword"
 ]
 _SHIELD_WORDS = ["shield","buckler","kite shield","tower shield"]
 _ARMOR_WORDS = [
@@ -164,9 +202,7 @@ def detect_candidate_slots(item_name: str) -> List[str]:
     if is_match(_NECK_WORDS, item_name):      slots += ["neck"]
     if is_match(_HEAD_WORDS, item_name):      slots += ["head"]
     if not slots:
-        # Fallback: let the user choose any slot
         slots = SLOTS.copy()
-    # Deduplicate while preserving order
     seen = set(); ordered = []
     for s in slots:
         if s not in seen:
@@ -182,13 +218,21 @@ def parse_bonuses(item_name: str) -> str:
 
 def ensure_equipped_slots(char: dict):
     """
-    Ensure 'equipped' exists as a slot dict:
-    { slot: {"item": str, "bonuses": str} or None }
+    Ensure 'equipped' is a slot dict with extended stats per slot:
+    {slot: {"item": str, "bonuses": str, "damage": str, "armor_bonus": str, "hit_bonus": str, "notes": str} or None}
     """
     if "equipped" not in char or not isinstance(char["equipped"], dict):
         char["equipped"] = {}
     for s in SLOTS:
-        char["equipped"].setdefault(s, None)
+        if char["equipped"].get(s) is None:
+            char["equipped"][s] = None
+        elif isinstance(char["equipped"][s], dict):
+            # add missing new fields
+            char["equipped"][s].setdefault("bonuses", "")
+            char["equipped"][s].setdefault("damage", "")
+            char["equipped"][s].setdefault("armor_bonus", "")
+            char["equipped"][s].setdefault("hit_bonus", "")
+            char["equipped"][s].setdefault("notes", "")
 
 def unequip_slot(char: dict, slot: str):
     ensure_equipped_slots(char)
@@ -198,24 +242,21 @@ def equip_to_slot(char: dict, slot: str, item_name: str, bonuses: Optional[str] 
     ensure_equipped_slots(char)
     if bonuses is None:
         bonuses = parse_bonuses(item_name)
-    # Remove the same item from any other slot (avoid duplicates)
+    # Remove same item from any other slot (avoid duplicates)
     for s in SLOTS:
         if char["equipped"].get(s) and char["equipped"][s]["item"] == item_name:
             char["equipped"][s] = None
-    # Put it in the chosen slot
-    char["equipped"][slot] = {"item": item_name, "bonuses": bonuses}
+    # Put it in the chosen slot with default stats
+    char["equipped"][slot] = {
+        "item": item_name,
+        "bonuses": bonuses or "",
+        "damage": "",
+        "armor_bonus": "",
+        "hit_bonus": "",
+        "notes": "",
+    }
 
 def auto_equip_defaults(char: dict):
-    """
-    Fill empty slots with sensible defaults from inventory.
-    - weapon -> right_arm
-    - shield -> left_arm
-    - armor -> body
-    - boots -> feet
-    - rings -> right_hand then left_hand
-    - necklace -> neck
-    - headwear -> head
-    """
     ensure_equipped_slots(char)
     inv = char.get("inventory", []) or []
 
@@ -240,16 +281,19 @@ def auto_equip_defaults(char: dict):
         b = first_match(_BOOTS_WORDS)
         if b: equip_to_slot(char, "feet", b)
 
-    # Rings: try to fill right then left
     if not char["equipped"]["right_hand"]:
-        r = first_match(_RING_WORDS)
+        r = None
+        for i in inv:
+            if is_match(_RING_WORDS, i):
+                r = i; break
         if r: equip_to_slot(char, "right_hand", r)
+
     if not char["equipped"]["left_hand"]:
-        # If right used the same ring name, find a different ring (best effort)
         r2 = None
         for i in inv:
-            if is_match(_RING_WORDS, i) and (not char["equipped"]["right_hand"] or char["equipped"]["right_hand"]["item"] != i):
-                r2 = i; break
+            if is_match(_RING_WORDS, i):
+                if not (char["equipped"]["right_hand"] and char["equipped"]["right_hand"]["item"] == i):
+                    r2 = i; break
         if r2: equip_to_slot(char, "left_hand", r2)
 
     if not char["equipped"]["neck"]:
@@ -286,9 +330,37 @@ def safe_model_text(resp) -> str:
         pass
     return "(No model text returned. Try a shorter action, or include a 'roll 12' style number for a quick skill check.)"
 
+# --- Narrative “system action” helper (consumes a turn) ---
+
+def consume_action_and_narrate(action_text: str):
+    """
+    Append a 'user' message describing a non-rolled action (e.g., adjusting gear),
+    then request a narrative response immediately.
+    """
+    st.session_state["history"].append({"role": "user", "content": action_text})
+    try:
+        final_narrative_config = GenerateContentConfig(
+            system_instruction=st.session_state["final_system_instruction"]
+        )
+        narr_resp = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=get_api_contents(st.session_state["history"]),
+            config=final_narrative_config
+        )
+        text = safe_model_text(narr_resp)
+        st.session_state["history"].append({"role": "assistant", "content": text})
+    except Exception as e:
+        st.session_state["history"].append({"role": "assistant", "content": f"Narrative error: {e}"})
+    st.rerun()
+
 # --- Character creation / game flow ---
 
-def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
+def apply_race_modifiers(char_data: dict, race: str):
+    mods = RACE_MODIFIERS.get(race, {})
+    for k, delta in mods.items():
+        char_data[k] = char_data.get(k, 0) + delta
+
+def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
     if not player_name or player_name in st.session_state["characters"]:
         st.error("Please enter a unique name for the new character.")
         return
@@ -305,7 +377,8 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
     creation_prompt = f"""
     Based on the setting: {setting}, genre: {genre}. Create a starting character named {player_name}.
     The character's primary role must be: {selected_class}.
-    Player's Custom Description: {custom_char_desc if custom_char_desc else "No specific background details provided. Create a generic background appropriate for the class."}
+    The race is: {race}. Reflect cultural/background flavor appropriately, but keep numbers in schema constraints.
+    Player's Custom Description: {custom_char_desc if custom_char_desc else "No specific background details provided. Create a generic background appropriate for the class and race."}
     The character should be balanced, attribute modifiers should range from -1 to +3, starting HP should be 20, and Morale/Sanity must start at 100.
     Fill in ALL fields in the required JSON schema.
     """
@@ -331,10 +404,13 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
 
             char_data = json.loads(raw)
             char_data['name'] = player_name
+            char_data['race'] = race
 
-            # Ensure fields & equip slots
+            # Ensure baseline fields and apply race mods once
             for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
                 char_data.setdefault(k, 0)
+            apply_race_modifiers(char_data, race)
+
             ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
 
@@ -343,7 +419,7 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             if not st.session_state["current_player"]:
                 st.session_state["current_player"] = player_name
             
-            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
+            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} ({race}) added to the party. Ready for adventure initiation."})
 
         except Exception as e:
             st.error(f"Character creation failed for {player_name}: {e}")
@@ -470,7 +546,8 @@ for key, default in [
     ("page", "SETUP"),
     ("custom_setting_description", ""),
     ("custom_character_description", ""),
-    ("new_player_name_input_setup_value", "")
+    ("new_player_name_input_setup_value", ""),
+    ("setup_race", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -531,12 +608,16 @@ if st.session_state["page"] == "SETUP":
             height=150, 
             placeholder="Example: A tall, paranoid ex-corporate security guard with a visible cybernetic eye and a strong fear of heights."
         )
+        # --- Race selection (under Character Description) ---
+        race_choices = RACE_OPTIONS.get(st.session_state["setup_setting"], ["Human"])
+        st.session_state["setup_race"] = st.selectbox("Race", race_choices, index=0)
 
     if col_char_creation.button("Add Character to Party"):
         if st.session_state["new_player_name_input_setup"]:
             create_new_character_handler(
                 st.session_state["setup_setting"], 
-                st.session_state["setup_genre"], 
+                st.session_state["setup_genre"],
+                st.session_state["setup_race"],
                 st.session_state["new_player_name_input_setup"],
                 st.session_state["setup_class"],
                 st.session_state["custom_character_description"],
@@ -563,7 +644,6 @@ elif st.session_state["page"] == "GAME":
 
     # ---------------------- SIDEBAR ----------------------
     with st.sidebar:
-        # Active Player at top
         with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
                 player_options = list(st.session_state["characters"].keys())
@@ -590,6 +670,7 @@ elif st.session_state["page"] == "GAME":
                 if active_char:
                     ensure_equipped_slots(active_char)
                     st.markdown(f"**Name:** {active_char.get('name','')}")
+                    st.markdown(f"**Race:** {active_char.get('race','')}")
                     st.markdown(f"**Class:** {active_char.get('race_class','')}")
                     st.markdown(f"**HP:** {active_char.get('current_hp','')}")
                     st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
@@ -598,7 +679,6 @@ elif st.session_state["page"] == "GAME":
                     st.markdown("**Inventory:**")
                     if active_char.get("inventory"):
                         for idx, item in enumerate(active_char["inventory"]):
-                            # Detect candidate slots
                             candidates = detect_candidate_slots(item)
                             cols = st.columns([4,3,2])
                             with cols[0]:
@@ -620,35 +700,49 @@ elif st.session_state["page"] == "GAME":
                                 if item_occupied_slot:
                                     if st.button("Unequip", key=f"unequip_btn_{active_char['name']}_{idx}"):
                                         unequip_slot(active_char, item_occupied_slot)
+                                        # Counts as a free action in UI; if you want it to consume a turn, swap to consume_action_and_narrate
                                         st.rerun()
                                 else:
                                     if st.button("Equip", key=f"equip_btn_{active_char['name']}_{idx}"):
                                         equip_to_slot(active_char, slot_key, item)
-                                        st.rerun()
+                                        # Consumes action: narrate spending the turn equipping
+                                        consume_action_and_narrate(f"({active_char['name']}) spends their turn equipping {item} to {SLOT_LABEL[slot_key]}.")
+
                     else:
                         st.caption("— (empty)")
 
-                    # Equipped by slots
+                    # Equipped by slots (with editable stats) — updating consumes a turn
                     st.markdown("**Equipped (by slot):**")
                     for s in SLOTS:
                         eq = active_char["equipped"].get(s)
                         label = SLOT_LABEL[s]
-                        cols = st.columns([6,3,2])
-                        with cols[0]:
+                        with st.container():
+                            st.markdown(f"- **{label}:** " + (eq["item"] if eq else "—"))
                             if eq:
-                                bonuses = f" _(bonuses: {eq.get('bonuses','')})_" if eq.get("bonuses") else ""
-                                st.markdown(f"- **{label}:** {eq['item']}{bonuses}")
-                            else:
-                                st.markdown(f"- **{label}:** —")
-                        with cols[1]:
-                            if eq:
-                                st.caption("equipped")
-                            else:
-                                st.caption("")
-                        with cols[2]:
-                            if eq and st.button("Unequip", key=f"slot_unequip_{active_char['name']}_{s}"):
-                                unequip_slot(active_char, s)
-                                st.rerun()
+                                # Editable stats for that slot
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    eq["damage"] = st.text_input("Damage", value=eq.get("damage",""), key=f"{active_char['name']}_{s}_damage")
+                                    eq["armor_bonus"] = st.text_input("Armor Bonus", value=eq.get("armor_bonus",""), key=f"{active_char['name']}_{s}_armor")
+                                with c2:
+                                    eq["hit_bonus"] = st.text_input("Hit/Attack Bonus", value=eq.get("hit_bonus",""), key=f"{active_char['name']}_{s}_hit")
+                                    eq["notes"] = st.text_input("Notes", value=eq.get("notes",""), key=f"{active_char['name']}_{s}_notes")
+                                # Update triggers an action + narration
+                                ucols = st.columns([3,2,2])
+                                with ucols[0]:
+                                    st.caption(f"bonuses: {eq.get('bonuses','') or '—'}")
+                                with ucols[1]:
+                                    if st.button("Update", key=f"update_slot_{active_char['name']}_{s}"):
+                                        # ensure the dict is written back (already mutating reference)
+                                        consume_action_and_narrate(
+                                            f"({active_char['name']}) spends their turn adjusting gear on {label}: "
+                                            f"{eq['item']} (damage={eq['damage'] or '—'}, armor_bonus={eq['armor_bonus'] or '—'}, "
+                                            f"hit_bonus={eq['hit_bonus'] or '—'}, notes={eq['notes'] or '—'})."
+                                        )
+                                with ucols[2]:
+                                    if st.button("Unequip", key=f"slot_unequip_{active_char['name']}_{s}"):
+                                        unequip_slot(active_char, s)
+                                        consume_action_and_narrate(f"({active_char['name']}) spends their turn unequipping {label}.")
 
                     st.markdown("---")
                     st.markdown("**Ability Modifiers**")
@@ -700,7 +794,6 @@ elif st.session_state["page"] == "GAME":
         if prompt:
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
-            # Ensure equipped structure always exists
             ensure_equipped_slots(active_char)
 
             full_prompt = f"({current_player_name}'s Turn): {prompt}"
@@ -712,22 +805,21 @@ elif st.session_state["page"] == "GAME":
                 )
                 raw_roll = extract_roll(prompt)
 
+                # Equip summary with stats for the model
+                equipped_summary = {
+                    SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)
+                }
+
                 # --- Logic call if a roll is detected ---
                 if raw_roll is not None:
                     st.toast(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
-
-                    # Condensed equipped summary for the model
-                    equipped_summary = {
-                        SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)
-                    }
-
                     logic_prompt = f"""
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
-                    2. Equipped (by slot): {json.dumps(equipped_summary)}
+                    2. Equipped (by slot) with stats: {json.dumps(equipped_summary)}
                     3. Player Action: "{prompt}"
                     4. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
-                    5. Calculate the result using the player's D20 roll ({raw_roll}), the correct modifier from the character stats, and consider equipped items' bonuses if applicable.
+                    5. Calculate the result using the player's D20 roll ({raw_roll}), the correct modifier from the character stats, and consider equipped items' bonuses and stats (damage/armor/hit) if applicable.
                     6. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
                     try:
