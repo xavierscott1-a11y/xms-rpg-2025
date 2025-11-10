@@ -427,19 +427,23 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the two main columns (Center Chat + Right Stats) ---
-    # Col_chat will fill the screen space, Col_stats will be rendered as the right sidebar
+    # The native sidebar handles controls.
     col_chat, col_stats = st.columns([5, 3]) 
     
     game_started = st.session_state["adventure_started"]
 
     # ---------------------------------------------------------------------
-    # NATIVE STREAMLIT SIDEBAR (For Controls - FIXED/SCROLLABLE)
+    # NATIVE STREAMLIT SIDEBAR (Controls - FIXED/SCROLLABLE)
     # ---------------------------------------------------------------------
     with st.sidebar:
-        st.header("Game Details")
-        st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
-        st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
-        st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
+        st.header("Game Controls")
+        
+        # Game Details Expander
+        with st.expander("World & Difficulty", expanded=False):
+            st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
+            st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
+        
         st.markdown("---")
         st.subheader("Save/Load")
         
