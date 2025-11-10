@@ -1,14 +1,26 @@
 import streamlit as st
 st.set_page_config(layout="wide")
 
-import os
 import json
 import re
 from google import genai
-# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List
+
+# ---- Style: widen sidebar (~25%) and adjust main area ----
+_SIDEBAR_CSS = """
+<style>
+/* Make the sidebar wider and shift main content accordingly */
+[data-testid="stSidebar"] { width: 420px; min-width: 420px; }
+@media (max-width: 1200px) {
+  [data-testid="stSidebar"] { width: 360px; min-width: 360px; }
+}
+/* Optional: tighten expander body spacing */
+section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
+</style>
+"""
+st.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
 
 # --- Configuration (API Client Setup) ---
 
@@ -24,10 +36,8 @@ except Exception as e:
     st.error(f"Error initializing Gemini Client: {e}")
     st.stop()
 
-
 # --- Game Data and Settings ---
 
-# Defined settings and genres for selection
 SETTINGS_OPTIONS = {
     "Classic Fantasy": ["High Magic Quest", "Gritty Dungeon Crawl", "Political Intrigue"],
     "Post-Apocalypse": ["Mutant Survival", "Cybernetic Wasteland", "Resource Scarcity"],
@@ -52,7 +62,6 @@ DIFFICULTY_OPTIONS = {
     "Hard (Lethal)": "DC scaling is brutal (max DC 25+). Critical failures are common. High chance of character death.",
 }
 
-# System Instruction Template - Set the core DM rules
 SYSTEM_INSTRUCTION_TEMPLATE = """
 You are the ultimate Dungeon Master (DM) and Storyteller, running a persistent TTRPG for {player_count} players in the **{setting}, {genre}** setting.
 IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
@@ -66,10 +75,9 @@ Your tone must match the genre: be immersive, tense, and dramatic.
 Your output must be pure, flowing narrative text. DO NOT include JSON unless specifically asked to perform a check.
 """
 
-# --- Schemas (Required for Structured Output) ---
+# --- Schemas ---
 
 class CharacterSheet(BaseModel):
-    """The full character data structure."""
     name: str = Field(description="The player's chosen name.")
     race_class: str = Field(description="The character's core identity.")
     str_mod: int = Field(description="Strength Modifier.")
@@ -89,7 +97,6 @@ character_creation_config = GenerateContentConfig(
 )
 
 class SkillCheckResolution(BaseModel):
-    """Structured data for resolving a single player action."""
     action: str = Field(description="The action the player attempted.")
     attribute_used: str = Field(description="The core attribute used for the check (e.g., 'Dexterity').")
     difficulty_class: int = Field(description="The DC set by the DM/Gemini.")
@@ -105,21 +112,35 @@ skill_check_config = GenerateContentConfig(
     response_schema=SkillCheckResolution,
 )
 
-
-# --- Helper Functions ---
+# --- Helpers ---
 
 def get_api_contents(history_list):
-    """Converts Streamlit history format to API content format."""
+    """Convert Streamlit history to Google GenAI Content list."""
     contents = []
     for msg in history_list:
-        if msg["content"] and isinstance(msg["content"], str):
-            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
+        if msg.get("content") and isinstance(msg["content"], str):
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
+def safe_model_text(resp) -> str:
+    """Be resilient to empty .text; try common places before giving a readable fallback."""
+    try:
+        if hasattr(resp, "text") and resp.text and resp.text.strip():
+            return resp.text.strip()
+        if hasattr(resp, "candidates") and resp.candidates:
+            for c in resp.candidates:
+                if hasattr(c, "content") and getattr(c.content, "parts", None):
+                    for p in c.content.parts:
+                        if getattr(p, "text", None) and p.text.strip():
+                            return p.text.strip()
+        if hasattr(resp, "prompt_feedback") and getattr(resp.prompt_feedback, "block_reason", None):
+            return f"(Model returned no text; block_reason={resp.prompt_feedback.block_reason})"
+    except Exception:
+        pass
+    return "(No model text returned. Try a shorter action, or include a 'roll 12' style number for a quick skill check.)"
+
 def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
-    """Function to call the API and create a character JSON."""
     if not player_name or player_name in st.session_state["characters"]:
         st.error("Please enter a unique name for the new character.")
         return
@@ -148,13 +169,25 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
                 response_mime_type="application/json",
                 response_schema=CharacterSheet,
             )
-            char_response = client.models.generate_content(
+            resp = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=creation_prompt,
                 config=char_config
             )
-            char_data = json.loads(char_response.text)
-            char_data['name'] = player_name  # ensure exact user input
+            raw = resp.text or ""
+            if not raw.strip():
+                fail_note = f"Character API returned no text. {safe_model_text(resp)}"
+                st.session_state["history"].append({"role": "assistant", "content": fail_note})
+                st.error("Character creation returned no text. Try again.")
+                return
+
+            char_data = json.loads(raw)
+            char_data['name'] = player_name
+
+            # Ensure optional fields exist for display
+            char_data.setdefault("equipped", [])  # list of {"item":"...", "bonuses":"+1 attack, +1 AC"}
+            for mod_key in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
+                char_data.setdefault(mod_key, 0)
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
@@ -164,28 +197,25 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
 
         except Exception as e:
-            st.error(f"Character creation failed for {player_name}: {e}. Try again in a moment.")
-            st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
+            st.error(f"Character creation failed for {player_name}: {e}")
+            st.session_state["history"].append({"role": "assistant", "content": f"Character creation error: {e}"})
 
     st.session_state["new_player_name_input_setup_value"] = ""
     st.session_state["custom_character_description"] = ""
     st.rerun() 
 
-
 def extract_roll(text):
-    """Helper function to extract a number (1-20) indicating a dice roll."""
     match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
-    if match and 1 <= int(match.group(2)) <= 20:
-        return int(match.group(2))
+    if match:
+        val = int(match.group(2))
+        if 1 <= val <= 20:
+            return val
     return None
 
 def start_adventure_handler():
-    """Wrapper to call start_adventure with current settings."""
     start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
 
-
 def start_adventure(setting, genre):
-    """Function to generate the initial narrative hook."""
     if st.session_state["current_player"] is None:
         st.error("Please create at least one character before starting the adventure!")
         return
@@ -205,22 +235,21 @@ def start_adventure(setting, genre):
             final_narrative_config = GenerateContentConfig(
                 system_instruction=st.session_state["final_system_instruction"]
             )
-            response = client.models.generate_content(
+            resp = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=intro_prompt,
                 config=final_narrative_config
             )
-            st.session_state["history"] = []
-            st.session_state["history"].append({"role": "assistant", "content": response.text})
+            text = safe_model_text(resp)
+            st.session_state["history"] = [{"role": "assistant", "content": text}]
             st.session_state["adventure_started"] = True
             st.session_state["page"] = "GAME"
             st.rerun()
-
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
+            st.session_state["history"].append({"role": "assistant", "content": f"Start error: {e}"})
 
 def save_game():
-    """Saves the essential game state to Streamlit's file system as JSON."""
     if not st.session_state["adventure_started"]:
         st.warning("Adventure must be started to save game.")
         return
@@ -241,74 +270,56 @@ def save_game():
     st.success("Game state saved to memory. Use the Download button to secure your file!")
 
 def load_game(uploaded_file):
-    """Loads game state from an uploaded file."""
     if uploaded_file is not None:
         try:
             bytes_data = uploaded_file.read()
             loaded_data = json.loads(bytes_data)
-
             st.session_state["__LOAD_DATA__"] = loaded_data
             st.session_state["__LOAD_FLAG__"] = True
-            
             st.success("Adventure loaded successfully! Restarting session...")
             st.rerun()
-
         except Exception as e:
             st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
 
-
-# --- Check for Staged Load Data (Runs BEFORE Widgets are created) ---
+# --- staged load (before widgets) ---
 if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     loaded_data = st.session_state["__LOAD_DATA__"]
-
     st.session_state["history"] = loaded_data["history"]
     st.session_state["characters"] = loaded_data["characters"]
     st.session_state["final_system_instruction"] = loaded_data["system_instruction"]
     st.session_state["current_player"] = loaded_data["current_player"]
     st.session_state["adventure_started"] = loaded_data["adventure_started"]
-    
     st.session_state["setup_setting"] = loaded_data.get("setting", "Post-Apocalypse")
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
     st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
+    # Ensure equipped exists for all characters after load
+    for k, v in st.session_state["characters"].items():
+        v.setdefault("equipped", [])
     st.session_state["page"] = "GAME"
-    
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
 
-
-# --- Streamlit UI Setup ---
-
+# --- Init session state ---
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
-# --- Initialize Session State (FINAL CHECK) ---
-if "history" not in st.session_state:
-    st.session_state["history"] = []
-if "characters" not in st.session_state:
-    st.session_state["characters"] = {}
-if "current_player" not in st.session_state:
-    st.session_state["current_player"] = None
-if "final_system_instruction" not in st.session_state:
-    st.session_state["final_system_instruction"] = None
-if "new_player_name" not in st.session_state: 
-    st.session_state["new_player_name"] = "" 
-if "adventure_started" not in st.session_state:
-    st.session_state["adventure_started"] = False
-if "saved_game_json" not in st.session_state:
-    st.session_state["saved_game_json"] = ""
-if "__LOAD_FLAG__" not in st.session_state:
-    st.session_state["__LOAD_FLAG__"] = False
-if "__LOAD_DATA__" not in st.session_state:
-    st.session_state["__LOAD_DATA__"] = None
-if "page" not in st.session_state:
-    st.session_state["page"] = "SETUP" 
-if "custom_setting_description" not in st.session_state:
-    st.session_state["custom_setting_description"] = "" 
-if "custom_character_description" not in st.session_state:
-    st.session_state["custom_character_description"] = "" 
-if "new_player_name_input_setup_value" not in st.session_state:
-    st.session_state["new_player_name_input_setup_value"] = ""
-
+for key, default in [
+    ("history", []),
+    ("characters", {}),
+    ("current_player", None),
+    ("final_system_instruction", None),
+    ("new_player_name", ""),
+    ("adventure_started", False),
+    ("saved_game_json", ""),
+    ("__LOAD_FLAG__", False),
+    ("__LOAD_DATA__", None),
+    ("page", "SETUP"),
+    ("custom_setting_description", ""),
+    ("custom_character_description", ""),
+    ("new_player_name_input_setup_value", "")
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # =========================================================================
 # PAGE 1: SETUP VIEW
@@ -316,17 +327,16 @@ if "new_player_name_input_setup_value" not in st.session_state:
 
 if st.session_state["page"] == "SETUP":
     st.header("1. Define Your Campaign World")
-    
     col_world_settings, col_world_description = st.columns([1, 2])
     
     with col_world_settings:
         st.subheader("Core Setting")
-        selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
-        selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], key="setup_genre")
+        _ = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
+        _ = st.selectbox("Choose Genre", SETTINGS_OPTIONS[st.session_state["setup_setting"]], key="setup_genre")
         
         st.subheader("Difficulty")
-        selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
-        st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
+        _ = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
+        st.caption(DIFFICULTY_OPTIONS[st.session_state["setup_difficulty"]])
         
         st.markdown("---")
         st.subheader("Load Existing Game")
@@ -336,7 +346,7 @@ if st.session_state["page"] == "SETUP":
 
     with col_world_description:
         st.subheader("Custom World Details")
-        st.markdown("Describe the location, climate, community disposition, or any key elements you want the DM to include in the campaign.")
+        st.markdown("Describe key elements you want in the campaign.")
         st.session_state["custom_setting_description"] = st.text_area(
             "Setting Details (optional)", 
             value=st.session_state["custom_setting_description"], 
@@ -352,8 +362,8 @@ if st.session_state["page"] == "SETUP":
     with col_char_creation:
         st.subheader("New Character")
         selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
-        selected_class = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
-        new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
+        _ = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
+        _ = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
         if st.session_state["characters"]:
             st.markdown(f"**Party Roster ({len(st.session_state['characters'])}):**")
@@ -361,7 +371,6 @@ if st.session_state["page"] == "SETUP":
         
     with col_char_details:
         st.subheader("Character Description")
-        st.markdown("Provide physical, personality, background, and association details (optional).")
         st.session_state["custom_character_description"] = st.text_area(
             "Character Details", 
             value=st.session_state["custom_character_description"], 
@@ -384,7 +393,6 @@ if st.session_state["page"] == "SETUP":
 
     st.markdown("---")
     st.header("3. Start Game")
-    
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
         st.button("🚀 START ADVENTURE", on_click=start_adventure_handler, type="primary")
@@ -392,17 +400,16 @@ if st.session_state["page"] == "SETUP":
         st.warning("Create at least one character to start.")
 
 # =========================================================================
-# PAGE 2: GAME VIEW (Main Application)
+# PAGE 2: GAME VIEW
 # =========================================================================
 
 elif st.session_state["page"] == "GAME":
-    # Single main container for chat
     col_chat = st.container()
     game_started = st.session_state["adventure_started"]
 
-    # ---------------------- SIDEBAR CONTROLS ----------------------
+    # ---------------------- SIDEBAR ----------------------
     with st.sidebar:
-        # ---- Active Player Stats at the very top ----
+        # Active Player at top
         with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
                 player_options = list(st.session_state["characters"].keys())
@@ -427,21 +434,54 @@ elif st.session_state["page"] == "GAME":
                 active_char = st.session_state["characters"].get(st.session_state["current_player"])
                 st.markdown("---")
                 if active_char:
-                    st.markdown(f"**Name:** {active_char['name']}")
-                    st.markdown(f"**Class:** {active_char['race_class']}")
-                    st.markdown(f"**HP:** {active_char['current_hp']}")
-                    st.markdown(f"**Sanity/Morale:** {active_char['morale_sanity']}")
-                    st.markdown("**Inventory:** " + ", ".join(active_char['inventory']))
+                    # Ensure equipped exists
+                    active_char.setdefault("equipped", [])
+
+                    st.markdown(f"**Name:** {active_char.get('name','')}")
+                    st.markdown(f"**Class:** {active_char.get('race_class','')}")
+                    st.markdown(f"**HP:** {active_char.get('current_hp','')}")
+                    st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
+                    st.markdown("**Inventory:** " + ", ".join(active_char.get('inventory', [])) if active_char.get('inventory') else "**Inventory:** —")
+
+                    # Equipped Items + Bonuses
+                    st.markdown("**Equipped:**")
+                    if active_char["equipped"]:
+                        for eq in active_char["equipped"]:
+                            item = eq.get("item", "Unknown item")
+                            bonuses = eq.get("bonuses", "")
+                            if bonuses:
+                                st.markdown(f"- {item} _(bonuses: {bonuses})_")
+                            else:
+                                st.markdown(f"- {item}")
+                    else:
+                        st.caption("None equipped")
+
+                    st.markdown("---")
+                    st.markdown("**Ability Modifiers**")
+                    # Compact 2-row grid: STR/DEX/CON | INT/WIS/CHA
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.markdown(f"**STR**: {active_char.get('str_mod', 0)}")
+                    with c2:
+                        st.markdown(f"**DEX**: {active_char.get('dex_mod', 0)}")
+                    with c3:
+                        st.markdown(f"**CON**: {active_char.get('con_mod', 0)}")
+                    c4, c5, c6 = st.columns(3)
+                    with c4:
+                        st.markdown(f"**INT**: {active_char.get('int_mod', 0)}")
+                    with c5:
+                        st.markdown(f"**WIS**: {active_char.get('wis_mod', 0)}")
+                    with c6:
+                        st.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
             else:
                 st.info("No characters created yet.")
 
-        # ---- Game Controls and other panels below ----
         st.header("Game Controls")
         with st.expander("World & Difficulty", expanded=False):
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
             st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
             st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
-        
+
         st.markdown("---")
         st.subheader("Save/Load")
         if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
@@ -471,14 +511,12 @@ elif st.session_state["page"] == "GAME":
             st.session_state["history"].append({"role": "user", "content": full_prompt})
             
             with st.spinner("The DM is thinking..."):
-                final_response_text = ""
                 final_narrative_config = GenerateContentConfig(
                     system_instruction=st.session_state["final_system_instruction"]
                 )
-                
                 raw_roll = extract_roll(prompt)
 
-                # ----- Logic call if a roll is detected -----
+                # --- Logic call if a roll is detected ---
                 if raw_roll is not None:
                     st.toast(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
                     logic_prompt = f"""
@@ -495,53 +533,49 @@ elif st.session_state["page"] == "GAME":
                             response_mime_type="application/json",
                             response_schema=SkillCheckResolution,
                         )
-                        logic_response = client.models.generate_content(
+                        logic_resp = client.models.generate_content(
                             model='gemini-2.5-flash',
                             contents=logic_prompt,
                             config=logic_config
                         )
-                        skill_check_outcome = json.loads(logic_response.text)
-
-                        roll = skill_check_outcome.get('player_d20_roll', 'N/A')
-                        mod = skill_check_outcome.get('attribute_modifier', 'N/A')
-                        total = skill_check_outcome.get('total_roll', 'N/A')
-                        dc = skill_check_outcome.get('difficulty_class', 'N/A')
-                        
-                        combat_display = f"""
-                        <div style="border:2px solid #2e7d32;padding:10px;border-radius:8px;background-color:#1e1e1e;color:#ffffff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
-                          <div style="font-weight:700;margin-bottom:6px;">{skill_check_outcome['outcome_result'].upper()}! ({skill_check_outcome['attribute_used']} Check)</div>
-                          <hr style="border:none;border-top:1px solid #555;margin:6px 0;">
-                          <div><strong>Roll:</strong> {roll} + <strong>Mod:</strong> {mod} = <strong>{total}</strong> (vs <strong>DC:</strong> {dc})</div>
-                        </div>
-                        """
-                        st.markdown(combat_display, unsafe_allow_html=True)
-                        st.toast(f"Result: {skill_check_outcome['outcome_result']}")
-                        
-                        follow_up_prompt = f"""
-                        The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
-                        1. Narrate the vivid, descriptive consequence of this result.
-                        2. Update the scene based on the outcome and ask the player what they do next.
-                        """
-                        st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
-                        st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
-
+                        raw_logic = logic_resp.text or ""
+                        if not raw_logic.strip():
+                            st.session_state["history"].append({"role": "assistant", "content": f"(No logic text) {safe_model_text(logic_resp)}"})
+                        else:
+                            skill = json.loads(raw_logic)
+                            roll = skill.get('player_d20_roll', 'N/A')
+                            mod = skill.get('attribute_modifier', 'N/A')
+                            total = skill.get('total_roll', 'N/A')
+                            dc = skill.get('difficulty_class', 'N/A')
+                            combat_display = f"""
+                            <div style="border:2px solid #2e7d32;padding:10px;border-radius:8px;background-color:#1e1e1e;color:#ffffff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+                              <div style="font-weight:700;margin-bottom:6px;">{skill.get('outcome_result','').upper()}! ({skill.get('attribute_used','')} Check)</div>
+                              <hr style="border:none;border-top:1px solid #555;margin:6px 0;">
+                              <div><strong>Roll:</strong> {roll} + <strong>Mod:</strong> {mod} = <strong>{total}</strong> (vs <strong>DC:</strong> {dc})</div>
+                            </div>
+                            """
+                            st.markdown(combat_display, unsafe_allow_html=True)
+                            st.toast(f"Result: {skill.get('outcome_result','')}")
+                            follow_up = f"""
+                            The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill)}.
+                            1. Narrate the vivid, descriptive consequence of this result.
+                            2. Update the scene based on the outcome and ask the player what they do next.
+                            """
+                            st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill)}//"})
+                            st.session_state["history"].append({"role": "user", "content": follow_up})
                     except Exception as e:
-                        st.error(f"Logic Call Failed: {e}")
-                        if st.session_state["history"] and st.session_state["history"][-1]["role"] == "user":
-                            st.session_state["history"].pop()
+                        st.session_state["history"].append({"role": "assistant", "content": f"Logic error: {e}"})
 
-                # ----- Narrative call (always) -----
+                # --- Narrative call (always) ---
                 try:
-                    narrative_response = client.models.generate_content(
+                    narr_resp = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=get_api_contents(st.session_state["history"]),
                         config=final_narrative_config
                     )
-                    final_response_text = narrative_response.text
+                    text = safe_model_text(narr_resp)
+                    st.session_state["history"].append({"role": "assistant", "content": text})
                 except Exception as e:
-                    final_response_text = f"Narrative API Error: {e}"
-
-                if not final_response_text.startswith("Narrative API Error"):
-                    st.session_state["history"].append({"role": "assistant", "content": final_response_text})
+                    st.session_state["history"].append({"role": "assistant", "content": f"Narrative error: {e}"})
                 
                 st.rerun()
