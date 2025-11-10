@@ -349,15 +349,13 @@ def auto_equip_defaults(char: dict):
             if "ring" in i.lower() and (not char["equipped"]["right_hand"] or char["equipped"]["right_hand"]["item"].lower()!=i.lower()):
                 equip_to_slot(char,"left_hand",i); break
 
-# -------- NEW: normalization helpers to fix legacy saves --------
+# -------- Normalization helpers to fix legacy saves --------
 def normalize_equipped_entry(entry: dict) -> Optional[dict]:
     """Ensure equipped entry has item, stats, and summary fields."""
     if not isinstance(entry, dict):
         return None
     item = entry.get("item", "")
-    stats = entry.get("stats")
-    if not stats:
-        stats = lookup_item_stats(item) or {}
+    stats = entry.get("stats") or lookup_item_stats(item) or {}
     summary = entry.get("summary") or summarize_item(item, stats)
     return {"item": item, "stats": stats, "summary": summary}
 
@@ -410,14 +408,15 @@ def compute_ac(char: dict) -> Tuple[int,str]:
 
 SYSTEM_INSTRUCTION_TEMPLATE = """
 You are the ultimate Dungeon Master (DM) and Storyteller for {player_count} players in **{setting}, {genre}**.
-
+IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
+Setting Details: {custom_setting_description}
+---
 Follow SRD-aligned rules (D&D 5e SRD-style, CC-BY-4.0) while keeping narration vivid:
 - Use STR for melee attack checks unless a weapon has the *finesse* property; use DEX for ranged.
 - Respect equipment stats and properties provided in the context. Two-handed weapons occupy both arms; no shield simultaneously.
 - Armor Class uses SRD-like formulas (light: base + Dex; medium: base + Dex up to +2; heavy: fixed; shield +2).
-- After a skill/attack resolution, include the mechanical line like:
-  "(Target AC {dc} vs Roll {roll} + Mod {mod} = {total}. {'Success' if total >= dc else 'Failure'})"
-
+- After a skill/attack resolution, include a mechanical line like:
+  "(Target AC {{dc}} vs Roll {{roll}} + Mod {{mod}} = {{total}}. {{'Success' if total >= dc else 'Failure'}})"
 Tone: immersive, tense, dramatic. Output pure narrative unless asked to produce JSON for checks.
 """
 
@@ -473,9 +472,10 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
         return
 
     final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
-        setting=setting, genre=genre,
+        setting=setting,
+        genre=genre,
         player_count=len(st.session_state["characters"]) + 1,
-        custom_setting_description=st.session_state['custom_setting_description'],
+        custom_setting_description=st.session_state.get('custom_setting_description', "")
     )
     
     creation_prompt = f"""
@@ -507,7 +507,7 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
 
             ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
-            normalize_all_equipped(char_data)  # <-- NEW: normalize freshly created
+            normalize_all_equipped(char_data)  # normalize freshly created
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
@@ -602,7 +602,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["custom_setting_description"] = d.get("custom_setting_description", "")
     for k, v in st.session_state["characters"].items():
         ensure_equipped_slots(v)
-        normalize_all_equipped(v)  # <-- NEW: normalize legacy loaded saves
+        normalize_all_equipped(v)  # normalize legacy loaded saves
     st.session_state["page"] = "GAME"
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
@@ -721,7 +721,7 @@ elif st.session_state["page"] == "GAME":
                 st.markdown("---")
                 if active_char:
                     ensure_equipped_slots(active_char)
-                    normalize_all_equipped(active_char)  # <-- NEW: normalize before rendering
+                    normalize_all_equipped(active_char)  # normalize before rendering
                     ac_val, ac_src = compute_ac(active_char)
                     st.markdown(f"**Name:** {active_char.get('name','')}")
                     st.markdown(f"**Race:** {active_char.get('race','')}")
