@@ -97,6 +97,7 @@ def get_api_contents(history_list):
     contents = []
     for msg in history_list:
         if msg["content"] and isinstance(msg["content"], str):
+            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
@@ -104,27 +105,30 @@ def get_api_contents(history_list):
 def create_new_character(setting, genre, player_name, custom_char_desc):
     """Function to call the API and create a character JSON."""
     
+    # Check if name is provided and unique
     if not player_name or player_name in st.session_state["characters"]:
         st.error("Please enter a unique name for the new character.")
         return
 
-    # 1. Update the System Instruction dynamically
+    # 1. Update the System Instruction with the user's choices
     final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
         setting=setting,
         genre=genre,
         player_count=len(st.session_state["characters"]) + 1,
-        custom_setting_description=st.session_state['custom_setting_description'] # Pass current setting description
+        custom_setting_description=st.session_state['custom_setting_description']
     )
     
     creation_prompt = f"""
     Based on the setting: {setting}, genre: {genre}, and the player's custom background, create a starting character named {player_name}.
     Player's Custom Description: {custom_char_desc}
-    The character should be balanced, modifiers should be reasonable, starting HP should be 20, and Morale/Sanity must start at 100.
+    The character should be balanced, attribute modifiers should range from -1 to +3, starting HP should be 20, and Morale/Sanity must start at 100.
     Fill in ALL fields in the required JSON schema.
     """
-
+    
+    success = False
     with st.spinner(f"Creating survivor {player_name} for {genre}..."):
         try:
+            # We pass the dynamically created system instruction for the character creation call
             temp_config = GenerateContentConfig(
                 system_instruction=final_system_instruction
             )
@@ -137,16 +141,28 @@ def create_new_character(setting, genre, player_name, custom_char_desc):
             char_data = json.loads(char_response.text)
             char_data['name'] = player_name 
 
+            # Store the character and set the active player if this is the first one
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
             if not st.session_state["current_player"]:
                 st.session_state["current_player"] = player_name
             
             st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
-            st.rerun() 
+            success = True
 
         except Exception as e:
             st.error(f"Character creation failed for {player_name}: {e}. Try a simpler name.")
+            st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
+
+    # --- CLEANUP AND RERUN (Final Fix) ---
+    # Clear the input fields regardless of success/failure to prevent subsequent errors
+    if "new_player_name_input_setup" in st.session_state:
+        st.session_state["new_player_name_input_setup"] = ""
+    if "custom_character_description" in st.session_state:
+        st.session_state["custom_character_description"] = ""
+    
+    st.rerun() 
+
 
 def extract_roll(text):
     """Helper function to extract a number (1-20) indicating a dice roll."""
@@ -162,10 +178,13 @@ def start_adventure(setting, genre):
         return
         
     intro_prompt = f"""
-    The game is about to begin in the {setting}, {genre} world. 
-    The setting is defined by: {st.session_state['custom_setting_description']}
+    The game is about to begin. The setting is {setting}, {genre}. 
     Provide a dramatic and engaging introductory narrative (about 3-4 paragraphs). 
-    End by asking the active player, {st.session_state['current_player']}, what they do next.
+    This introduction should:
+    1. Name the starting location (e.g., 'The Whispering Alley').
+    2. Describe the scenery vividly.
+    3. Present an immediate, intriguing event or challenge (the hook) that requires the players to act.
+    4. End by asking the active player, {st.session_state['current_player']}, what they do next.
     """
     
     with st.spinner("Generating epic adventure hook..."):
@@ -182,7 +201,7 @@ def start_adventure(setting, genre):
             
             st.session_state["history"] = []
             st.session_state["history"].append({"role": "assistant", "content": response.text})
-            st.session_state["adventure_started"] = True 
+            st.session_state["adventure_started"] = True # Mark the game as started
             st.session_state["page"] = "GAME" # Switch page to Game View
             st.rerun() 
 
@@ -201,6 +220,7 @@ def save_game():
         "system_instruction": st.session_state["final_system_instruction"],
         "current_player": st.session_state["current_player"],
         "adventure_started": st.session_state["adventure_started"],
+        # Save widget values to restore the UI
         "setting": st.session_state["setup_setting"], 
         "genre": st.session_state["setup_genre"],
         "custom_setting_description": st.session_state["custom_setting_description"],
@@ -216,11 +236,12 @@ def load_game(uploaded_file):
             bytes_data = uploaded_file.read()
             loaded_data = json.loads(bytes_data)
 
+            # Store data in staging variables to avoid the modification error
             st.session_state["__LOAD_DATA__"] = loaded_data
             st.session_state["__LOAD_FLAG__"] = True
             
             st.success("Adventure loaded successfully! Restarting session...")
-            st.rerun() 
+            st.rerun() # Force a rerun to apply the staged data
 
         except Exception as e:
             st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
@@ -231,6 +252,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     
     loaded_data = st.session_state["__LOAD_DATA__"]
 
+    # Apply data directly to session state before any widgets are rendered
     st.session_state["history"] = loaded_data["history"]
     st.session_state["characters"] = loaded_data["characters"]
     st.session_state["final_system_instruction"] = loaded_data["system_instruction"]
@@ -243,6 +265,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
     st.session_state["page"] = "GAME" # Force game page after load
     
+    # Clear the staging variables
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
 
@@ -336,10 +359,7 @@ if st.session_state["page"] == "SETUP":
                 st.session_state["new_player_name_input_setup"],
                 st.session_state["custom_character_description"] # Pass description to function
             )
-            # Clear the character fields after successful creation
-            st.session_state["custom_character_description"] = ""
-            st.session_state["new_player_name_input_setup"] = ""
-            st.rerun()
+            # Cleanup handled inside the function via rerun
         else:
             st.error("Please provide both a Character Name and Description.")
 
@@ -373,6 +393,7 @@ elif st.session_state["page"] == "GAME":
         with st.container(border=True):
             st.header("Game Details")
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+            st.markdown(f"**Details:** {st.session_state.get('custom_setting_description')}")
             st.markdown("---")
             st.subheader("Roster")
             if st.session_state["characters"]:
@@ -416,7 +437,7 @@ elif st.session_state["page"] == "GAME":
                     player_options,
                     key="player_selector",
                     index=default_index,
-                    disabled=not game_started
+                    disabled=not game_started # Disable switching during core narrative responses
                 )
                 st.session_state["current_player"] = st.session_state["player_selector"]
                 
