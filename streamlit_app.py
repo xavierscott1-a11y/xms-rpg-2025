@@ -16,7 +16,6 @@ _SIDEBAR_CSS = """
 @media (max-width: 1200px) {
   [data-testid="stSidebar"] { width: 360px; min-width: 360px; }
 }
-/* Optional: tighten expander body spacing */
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 </style>
 """
@@ -112,7 +111,71 @@ skill_check_config = GenerateContentConfig(
     response_schema=SkillCheckResolution,
 )
 
-# --- Helpers ---
+# --- Helpers: equipment, parsing, API text ---
+
+_WEAPON_WORDS = [
+    "sword","dagger","axe","mace","spear","bow","crossbow","staff","club",
+    "blade","hammer","sabre","saber","rapier","longsword","shortsword","katana",
+    "pistol","rifle","shotgun","smg","smg.","revolver"
+]
+_ARMOR_WORDS = [
+    "armor","armour","leather","chain","chainmail","mail","scale","plate",
+    "breastplate","brigandine","shield","helmet","helm","vest","kevlar"
+]
+
+def is_weapon(item_name: str) -> bool:
+    name = item_name.lower()
+    return any(w in name for w in _WEAPON_WORDS)
+
+def is_armor(item_name: str) -> bool:
+    name = item_name.lower()
+    return any(w in name for w in _ARMOR_WORDS)
+
+def parse_bonuses(item_name: str) -> str:
+    """
+    Quick-n-dirty bonus parser: finds things like '+1', '+2 to attack', etc.
+    If none found, empty string.
+    """
+    name = item_name
+    # Collect any +N or +N to <stat> patterns
+    bonuses = []
+    for m in re.findall(r"\+\s*\d+(?:\s*(?:to|vs\.?)\s*[A-Za-z ]+)?", name):
+        bonuses.append(m.strip())
+    return ", ".join(bonuses)
+
+def ensure_equipped_field(char: dict):
+    if "equipped" not in char or not isinstance(char["equipped"], list):
+        char["equipped"] = []
+
+def is_item_equipped(char: dict, item_name: str) -> bool:
+    ensure_equipped_field(char)
+    return any(eq.get("item") == item_name for eq in char["equipped"])
+
+def equip_item(char: dict, item_name: str, bonuses: str = ""):
+    ensure_equipped_field(char)
+    if not is_item_equipped(char, item_name):
+        if not bonuses:
+            bonuses = parse_bonuses(item_name)
+        char["equipped"].append({"item": item_name, "bonuses": bonuses})
+
+def unequip_item(char: dict, item_name: str):
+    ensure_equipped_field(char)
+    char["equipped"] = [eq for eq in char["equipped"] if eq.get("item") != item_name]
+
+def auto_equip_defaults(char: dict):
+    """
+    If nothing is equipped, auto-equip first weapon and first armor found in inventory.
+    """
+    ensure_equipped_field(char)
+    if char["equipped"]:
+        return
+    inv = char.get("inventory", []) or []
+    first_weapon = next((i for i in inv if is_weapon(i)), None)
+    first_armor  = next((i for i in inv if is_armor(i)), None)
+    if first_weapon:
+        equip_item(char, first_weapon)
+    if first_armor:
+        equip_item(char, first_armor)
 
 def get_api_contents(history_list):
     """Convert Streamlit history to Google GenAI Content list."""
@@ -139,6 +202,8 @@ def safe_model_text(resp) -> str:
     except Exception:
         pass
     return "(No model text returned. Try a shorter action, or include a 'roll 12' style number for a quick skill check.)"
+
+# --- Character creation / game flow ---
 
 def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     if not player_name or player_name in st.session_state["characters"]:
@@ -184,10 +249,11 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             char_data = json.loads(raw)
             char_data['name'] = player_name
 
-            # Ensure optional fields exist for display
-            char_data.setdefault("equipped", [])  # list of {"item":"...", "bonuses":"+1 attack, +1 AC"}
+            # Ensure optional fields exist for display & auto-equip basics
+            char_data.setdefault("equipped", [])
             for mod_key in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
                 char_data.setdefault(mod_key, 0)
+            auto_equip_defaults(char_data)
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
@@ -220,6 +286,12 @@ def start_adventure(setting, genre):
         st.error("Please create at least one character before starting the adventure!")
         return
         
+    # Auto-equip defaults for all characters at the start of the game if not already equipped
+    for _name, _char in st.session_state["characters"].items():
+        ensure_equipped_field(_char)
+        if not _char["equipped"]:
+            auto_equip_defaults(_char)
+    
     intro_prompt = f"""
     The game is about to begin. The setting is {setting}, {genre}. 
     Provide a dramatic and engaging introductory narrative (about 3-4 paragraphs). 
@@ -434,31 +506,53 @@ elif st.session_state["page"] == "GAME":
                 active_char = st.session_state["characters"].get(st.session_state["current_player"])
                 st.markdown("---")
                 if active_char:
-                    # Ensure equipped exists
-                    active_char.setdefault("equipped", [])
+                    # Ensure equipped exists & attempt default equip if somehow empty
+                    ensure_equipped_field(active_char)
+                    if not active_char["equipped"]:
+                        auto_equip_defaults(active_char)
 
                     st.markdown(f"**Name:** {active_char.get('name','')}")
                     st.markdown(f"**Class:** {active_char.get('race_class','')}")
                     st.markdown(f"**HP:** {active_char.get('current_hp','')}")
                     st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
-                    st.markdown("**Inventory:** " + ", ".join(active_char.get('inventory', [])) if active_char.get('inventory') else "**Inventory:** —")
+                    
+                    # Inventory + Equip/Unequip controls
+                    st.markdown("**Inventory:**")
+                    if active_char.get("inventory"):
+                        for idx, item in enumerate(active_char["inventory"]):
+                            equipped_flag = is_item_equipped(active_char, item)
+                            cols = st.columns([4,2,3])
+                            with cols[0]:
+                                st.markdown(f"- {item}")
+                            with cols[1]:
+                                if equipped_flag:
+                                    if st.button("Unequip", key=f"unequip_{active_char['name']}_{idx}"):
+                                        unequip_item(active_char, item)
+                                        st.rerun()
+                                else:
+                                    if st.button("Equip", key=f"equip_{active_char['name']}_{idx}"):
+                                        equip_item(active_char, item)  # auto-parse bonuses
+                                        st.rerun()
+                            with cols[2]:
+                                # Show/preview parsed bonuses (read-only hint)
+                                hint = parse_bonuses(item)
+                                if hint:
+                                    st.caption(f"bonuses: {hint}")
+                    else:
+                        st.caption("— (empty)")
 
                     # Equipped Items + Bonuses
                     st.markdown("**Equipped:**")
                     if active_char["equipped"]:
-                        for eq in active_char["equipped"]:
+                        for eq_idx, eq in enumerate(active_char["equipped"]):
                             item = eq.get("item", "Unknown item")
                             bonuses = eq.get("bonuses", "")
-                            if bonuses:
-                                st.markdown(f"- {item} _(bonuses: {bonuses})_")
-                            else:
-                                st.markdown(f"- {item}")
+                            st.markdown(f"- {item}" + (f" _(bonuses: {bonuses})_" if bonuses else ""))
                     else:
                         st.caption("None equipped")
 
                     st.markdown("---")
                     st.markdown("**Ability Modifiers**")
-                    # Compact 2-row grid: STR/DEX/CON | INT/WIS/CHA
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.markdown(f"**STR**: {active_char.get('str_mod', 0)}")
@@ -522,10 +616,11 @@ elif st.session_state["page"] == "GAME":
                     logic_prompt = f"""
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
-                    2. Player Action: "{prompt}"
-                    3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
-                    4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
-                    5. Return ONLY the JSON object following the SkillCheckResolution schema.
+                    2. Equipped Items with Bonuses: {json.dumps(active_char.get('equipped', []))}
+                    3. Player Action: "{prompt}"
+                    4. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
+                    5. Calculate the result using the player's D20 roll ({raw_roll}), the correct modifier from the character stats, and consider equipped bonuses if applicable.
+                    6. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
                     try:
                         logic_config = GenerateContentConfig(
