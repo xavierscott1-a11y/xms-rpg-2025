@@ -2,15 +2,14 @@ import streamlit as st
 st.set_page_config(layout="wide")
 
 import json, re, string, random, math
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 import streamlit.components.v1 as components
 
 # Optional AI narration (kept off by default)
 USE_AI_NARRATION_DEFAULT = False
 try:
     from google import genai
-    from google.genai.types import Content, Part, GenerateContentConfig
+    from google.genai.types import GenerateContentConfig
     GEMINI_AVAILABLE = True
 except Exception:
     GEMINI_AVAILABLE = False
@@ -64,11 +63,6 @@ Keep narration vivid, tense, and responsive to recent mechanics without contradi
 Do not output rules text; focus on story beats and sensory details, and always end with a clear prompt asking what the party does next."""
 
 # =================== Core data & rules (SRD-like) ===================
-
-# Ability modifier container (we’ll keep modifiers rather than full scores)
-ABILS = ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]
-
-# Level / XP quick table (Lv1–5 for demo)
 LEVEL_TABLE = [
     (1, 0,   2),  # (level, xp_min, proficiency_bonus)
     (2, 300, 2),
@@ -77,13 +71,11 @@ LEVEL_TABLE = [
     (5, 6500,3),
 ]
 
-# Simple class info
 CASTING_MOD = {"Wizard":"int_mod","Cleric":"wis_mod"}
-MARTIAL_CLASSES = {"Fighter","Barbarian","Rogue","Paladin","Ranger"}  # influences weapon proficiency defaults (simple+martial)
+MARTIAL_CLASSES = {"Fighter","Barbarian","Rogue","Paladin","Ranger"}
 SIMPLE_WEAPON_PROF = {"Wizard","Cleric","Rogue","Barbarian","Fighter","Paladin","Ranger"}
 MARTIAL_WEAPON_PROF = {"Fighter","Barbarian","Paladin","Ranger"}
 
-# Canonical caster mapping
 CASTER_KEYWORDS = {"wizard":"Wizard","cleric":"Cleric"}
 def canonical_class(name: Optional[str]) -> str:
     s = (name or "").lower()
@@ -91,7 +83,7 @@ def canonical_class(name: Optional[str]) -> str:
         if k in s: return v
     return (name or "").strip().title()
 
-# SRD lite items (same as your prior version)
+# SRD-lite items
 SRD_ITEMS = {
     "dagger":{"type":"weapon","hands":1,"damage":"1d4","properties":["finesse","light","thrown"],"simple":True},
     "shortsword":{"type":"weapon","hands":1,"damage":"1d6","properties":["finesse","light"],"simple":False},
@@ -141,7 +133,6 @@ def canonicalize_item_name(name:str)->Optional[str]:
     tokens=_tok(low); joined=" ".join(tokens)
     if joined in ALIASES and ALIASES[joined] in SRD_ITEMS: return ALIASES[joined]
     if joined in SRD_ITEMS: return joined
-    # fuzzy subset
     name_t=set(tokens); best=None; best_len=-1
     for k in SRD_ITEMS:
         kt=set(_tok(k))
@@ -165,7 +156,6 @@ def ensure_equipped(char:Dict):
 def equip(char:Dict, slot:str, item:str):
     ensure_equipped(char)
     stats=item_stats(item) or {}
-    # un-equip same item elsewhere
     norm=(canonicalize_item_name(item) or item).lower()
     for s in SLOTS:
         eq=char["equipped"].get(s)
@@ -173,7 +163,6 @@ def equip(char:Dict, slot:str, item:str):
             char["equipped"][s]=None
     entry={"item":item,"stats":stats}
     char["equipped"][slot]=entry
-    # handle 2h weapon occupying both arms & no shield
     if stats.get("type")=="weapon" and stats.get("hands",1)==2:
         other="left_arm" if slot=="right_arm" else "right_arm"
         char["equipped"][other]=entry
@@ -221,11 +210,8 @@ def level_for_xp(xp:int)->int:
     return lvl
 
 def roll(dice:str)->int:
-    # supports "XdY[+Z]" and single "dY"
-    dice=dice.lower().strip()
-    m=re.match(r'(\d+)?d(\d+)([+-]\d+)?$', dice)
+    m=re.match(r'(\d+)?d(\d+)([+-]\d+)?$', dice.lower().strip())
     if not m:
-        # try plain int
         try: return int(dice)
         except: return 0
     n=int(m.group(1) or 1); sides=int(m.group(2)); mod=int(m.group(3) or 0)
@@ -234,12 +220,10 @@ def roll(dice:str)->int:
 def dm_attack_bonus(char:Dict, weapon_stats:Dict)->int:
     cls=canonical_class(char.get("race_class"))
     pb=prof_bonus_for_xp(int(char.get("experience",0)))
-    # ability: finesse/ranged=DEX, else STR
     finesse = "finesse" in (weapon_stats.get("properties") or [])
     ranged  = bool(weapon_stats.get("ranged"))
     abil = "dex_mod" if (finesse or ranged) else "str_mod"
     mod = int(char.get(abil,0))
-    # proficiency?
     simple_ok = weapon_stats.get("simple", False)
     martial_ok = not simple_ok
     prof = False
@@ -249,14 +233,12 @@ def dm_attack_bonus(char:Dict, weapon_stats:Dict)->int:
 
 def dm_damage_roll(weapon_stats:Dict, abil_mod:int)->int:
     dmg=roll(weapon_stats.get("damage","1"))
-    # STR to melee damage; DEX if finesse (house rule common)
     finesse="finesse" in (weapon_stats.get("properties") or [])
     ranged=bool(weapon_stats.get("ranged"))
     add = abil_mod if (finesse or not ranged) else 0
     return max(1, dmg + add)
 
 # =================== Spell system (Lv1 demo effects) ===================
-
 WIZARD_L1 = ["Magic Missile","Shield","Mage Armor","Burning Hands","Thunderwave","Detect Magic","Identify","Grease","Sleep","Chromatic Orb"]
 CLERIC_L1 = ["Cure Wounds","Bless","Shield of Faith","Guiding Bolt","Healing Word","Detect Evil and Good","Sanctuary","Inflict Wounds","Protection from Evil and Good"]
 
@@ -294,9 +276,7 @@ def consume_slot(char:Dict, level:int=1)->bool:
     slots["current"]-=1
     return True
 
-# --- Spell effects (very compact SRD-like summaries; no proprietary text) ---
 def do_spell_effect(state:Dict, caster:Dict, spell:str, target_name:str=""):
-    """Mutates state (HP etc.). Returns (log_lines)."""
     logs=[]
     cname=caster["name"]
     cls=canonical_class(caster.get("race_class"))
@@ -304,26 +284,18 @@ def do_spell_effect(state:Dict, caster:Dict, spell:str, target_name:str=""):
         return [f"{cname} tries to cast {spell}, but it isn't prepared."]
     if not consume_slot(caster,1):
         return [f"{cname} has no spell slots left."]
-
     dc=spell_save_dc(caster)
-    pb = prof_bonus_for_xp(int(caster.get("experience",0)))
-    cast_mod = int(caster.get(CASTING_MOD.get(cls,"int_mod"),0))
-
-    # Helper to find combatant by name
     def get_cbt(name:str)->Optional[Dict]:
         for c in state["encounter"]["combatants"]:
             if c["name"].lower()==name.lower(): return c
         return None
-
-    # Effects
     if spell=="Cure Wounds":
-        amt = roll("1d8") + max(0, cast_mod)
+        amt = roll("1d8") + max(0, int(caster.get(CASTING_MOD.get(cls,'int_mod'),0)))
         tgt = get_cbt(target_name) or caster
         if tgt.get("dead"): return [f"{cname} casts Cure Wounds, but {tgt['name']} is dead."]
         tgt["current_hp"] = min(tgt["max_hp"], tgt["current_hp"] + amt)
         logs.append(f"{cname} casts Cure Wounds on {tgt['name']} and restores {amt} HP.")
     elif spell=="Magic Missile":
-        # 3 darts, 1d4+1 each; let user choose single target for simplicity
         darts = [roll("1d4")+1 for _ in range(3)]
         dmg=sum(darts)
         tgt=get_cbt(target_name) or None
@@ -332,25 +304,19 @@ def do_spell_effect(state:Dict, caster:Dict, spell:str, target_name:str=""):
         logs.append(f"{cname} casts Magic Missile at {tgt['name']} for {dmg} force damage (auto-hit).")
         if tgt["current_hp"]<=0: handle_ko_or_death(tgt, logs)
     elif spell=="Burning Hands":
-        # Simple: one target makes DEX save; fail: 3d6, success half
         dmg_full = sum(roll("1d6") for _ in range(3))
         tgt=get_cbt(target_name) or None
         if not tgt: return [f"{cname} casts Burning Hands, but no valid target is selected."]
         save_roll = random.randint(1,20) + int(tgt.get("dex_mod",0))
         if save_roll >= dc:
-            dmg = math.floor(dmg_full/2)
-            res="succeeds"
+            dmg = math.floor(dmg_full/2); res="succeeds"
         else:
-            dmg = dmg_full
-            res="fails"
+            dmg = dmg_full; res="fails"
         tgt["current_hp"]-=dmg
         logs.append(f"{cname} casts Burning Hands; {tgt['name']} {res} DEX save (DC {dc}) and takes {dmg} fire damage.")
         if tgt["current_hp"]<=0: handle_ko_or_death(tgt, logs)
     elif spell=="Bless":
-        # Simple concentration buff: +1d4 to attack rolls for up to 3 allies this encounter
-        # We’ll mark a flag on party side; resets at end of encounter.
         state["encounter"].setdefault("bless", set())
-        # auto-applies to caster + 2 others you choose minimally—here: whole party up to 3
         party = [c for c in state["encounter"]["combatants"] if c.get("is_player")]
         chosen = [c["name"] for c in party[:3]]
         state["encounter"]["bless"] = set(chosen)
@@ -372,7 +338,6 @@ MONSTERS = {
 }
 
 # =================== Encounter helpers ===================
-
 def new_combatant_from_char(c:Dict)->Dict:
     ac,_=ac_calc(c)
     return {
@@ -432,7 +397,6 @@ def begin_encounter(state:Dict):
 def end_encounter(state:Dict):
     enc=state.get("encounter")
     if not enc: return
-    # Award XP equally to living party (very simple): 50 XP per monster defeated
     defeated = [c for c in enc["combatants"] if not c["is_player"] and (c["dead"] or c["current_hp"]<=0)]
     xp = 50*len(defeated)
     state["encounter"]["xp_reward"]=xp
@@ -445,7 +409,6 @@ def end_encounter(state:Dict):
 
 def handle_ko_or_death(cbt:Dict, logs:List[str]):
     if cbt["current_hp"]>0: return
-    # Drop to 0 and start death saves (PC) or dead (monster)
     if cbt["is_player"]:
         cbt["current_hp"]=0
         logs.append(f"{cbt['name']} falls to 0 HP and begins making death saving throws.")
@@ -471,8 +434,7 @@ def perform_death_save(cbt:Dict, logs:List[str]):
         cbt["dead"]=True
         logs.append(f"{cbt['name']} dies.")
 
-# =================== Streamlit session state ===================
-
+# =================== Streamlit session state (with SAFE RESET FLAG) ===================
 def init_state():
     for k,v in [
         ("history",[]), ("characters",{}), ("current_player",None),
@@ -481,25 +443,23 @@ def init_state():
         ("setup_genre","High Magic Quest"), ("setup_difficulty","Normal (Balanced)"),
         ("use_ai_narration", USE_AI_NARRATION_DEFAULT and (client is not None)),
         ("system_instruction", SYSTEM_INSTRUCTION),
-        ("encounter", None), ("_scroll_to_top", False)
+        ("encounter", None), ("_scroll_to_top", False),
+        ("_reset_setup_fields", False),  # NEW: defer clearing widget keys safely
     ]:
         st.session_state.setdefault(k,v)
 init_state()
 
 # =================== Character creation (local) ===================
-
 SETTINGS_OPTIONS = {
     "Classic Fantasy": ["High Magic Quest","Gritty Dungeon Crawl","Political Intrigue"],
     "Post-Apocalypse": ["Mutant Survival","Cybernetic Wasteland","Resource Scarcity"],
     "Cyberpunk": ["Corporate Espionage","Street Gang Warfare","AI Revolution"],
 }
-
 CLASS_OPTIONS = {
     "Classic Fantasy": ["Fighter","Wizard","Rogue","Cleric","Barbarian"],
     "Post-Apocalypse": ["Scavenger","Mutant","Tech Specialist","Warlord","Drifter"],
     "Cyberpunk": ["Street Samurai","Netrunner","Corpo","Techie","Gang Enforcer"],
 }
-
 RACE_OPTIONS = {
     "Classic Fantasy": ["Human","Elf","Dwarf","Halfling","Orc","Tiefling"],
     "Post-Apocalypse": ["Human","Mutant","Android","Cyborg","Beastkin"],
@@ -515,18 +475,13 @@ RACE_MODS = {
 }
 
 def create_character(name:str, race:str, role:str, desc:str)->Dict:
-    # Base modifiers modest spread
     mods = {"str_mod":0,"dex_mod":0,"con_mod":0,"int_mod":0,"wis_mod":0,"cha_mod":0}
-    # Nudge by class
     if "Fighter" in role or "Barbarian" in role: mods["str_mod"]=2
     if "Rogue" in role: mods["dex_mod"]=2
     if "Wizard" in role: mods["int_mod"]=2
     if "Cleric" in role: mods["wis_mod"]=2
-    # Apply race
     for k,delta in RACE_MODS.get(race,{}).items(): mods[k]+=delta
-    # Clamp between -1 and +3 (as your original)
     for k in mods: mods[k]=max(-1, min(3, mods[k]))
-    base_inv = ["dagger","leather armor","shield","longsword","shortbow","20 arrows","backpack","boots","ring","amulet","helm"]
     inv = ["longsword","leather armor","shield","boots","ring","amulet","helm"] if role in ("Fighter","Cleric","Barbarian") else \
           ["rapier","leather armor","dagger","boots","ring","amulet","helm"]
     char = {
@@ -536,7 +491,6 @@ def create_character(name:str, race:str, role:str, desc:str)->Dict:
         "inventory": inv, "experience": 0, "level": 1, "equipped": {}
     }
     ensure_equipped(char)
-    # auto-equip armor, main weapon, shield
     if "leather armor" in inv: equip(char,"body","leather armor")
     weapon = "longsword" if "longsword" in inv else "rapier" if "rapier" in inv else inv[0]
     equip(char,"right_arm",weapon)
@@ -545,7 +499,6 @@ def create_character(name:str, race:str, role:str, desc:str)->Dict:
     if "helm" in inv: equip(char,"head","helm")
     if "ring" in inv: equip(char,"right_hand","ring")
     if "amulet" in inv: equip(char,"neck","amulet")
-    # spell setup for casters
     cls=canonical_class(role)
     if cls in CLASS_SPELLS:
         ensure_spell_fields(char)
@@ -555,6 +508,12 @@ def create_character(name:str, race:str, role:str, desc:str)->Dict:
 st.title("🧙 RPG Storyteller DM (SRD-style, playable)")
 
 if st.session_state["page"]=="SETUP":
+    # NEW: Clear fields before rendering widgets if requested last run
+    if st.session_state.get("_reset_setup_fields"):
+        st.session_state["_reset_setup_fields"] = False
+        st.session_state["setup_name"] = ""
+        st.session_state["setup_desc"] = ""
+
     st.header("1) Campaign Setup")
     c1,c2 = st.columns([1,2])
     with c1:
@@ -585,7 +544,9 @@ if st.session_state["page"]=="SETUP":
                 if not st.session_state["current_player"]:
                     st.session_state["current_player"]=name
                 st.success(f"Added {name} ({race} {role}).")
-                st.session_state["setup_name"]=""
+                # SAFE CLEAR: set flag and rerun (do not mutate widget key immediately)
+                st.session_state["_reset_setup_fields"] = True
+                st.rerun()
     with cc2:
         st.text_area("Character Description (optional)", key="setup_desc", height=120)
         if st.session_state["characters"]:
@@ -611,7 +572,6 @@ if st.session_state["page"]=="GAME":
         _scroll_to_top()
         st.session_state["_scroll_to_top"]=False
 
-    # Sidebar: Active Player + Controls
     with st.sidebar:
         with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
@@ -637,7 +597,6 @@ if st.session_state["page"]=="GAME":
                 with c3: st.markdown(f"WIS {ch['wis_mod']}  \nCHA {ch['cha_mod']}")
                 st.markdown("---")
                 st.markdown("**Inventory & Equipment**")
-                # Inventory equip controls
                 for i, itm in enumerate(ch["inventory"]):
                     cA,cB,cC=st.columns([4,3,2])
                     with cA: st.markdown(f"- {itm}")
@@ -668,7 +627,6 @@ if st.session_state["page"]=="GAME":
                     else:
                         st.markdown(f"- **{label}**: —")
 
-                # Spells (if caster)
                 cls=canonical_class(ch.get("race_class"))
                 if cls in CLASS_SPELLS:
                     ensure_spell_fields(ch)
@@ -687,7 +645,6 @@ if st.session_state["page"]=="GAME":
                             st.success("Spells updated.")
 
         st.header("Game Controls")
-        # Encounter controls
         with st.expander("Encounter Manager", expanded=True):
             enc=st.session_state.get("encounter")
             if not enc or not enc.get("active"):
@@ -701,7 +658,6 @@ if st.session_state["page"]=="GAME":
             if st.session_state.get("encounter"):
                 enc=st.session_state["encounter"]
                 if enc.get("active"):
-                    # Add monsters
                     mC1,mC2 = st.columns([2,1])
                     with mC1:
                         mtype = st.selectbox("Add Monster (template)", list(MONSTERS.keys()), key="mtype")
@@ -722,7 +678,6 @@ if st.session_state["page"]=="GAME":
                                 init.append((c["name"], roll_initiative(c)))
                             init.sort(key=lambda x: x[1], reverse=True)
                             enc["initiative"]=init
-                            # reorder combatants by initiative
                             order = [n for n,_ in init]
                             enc["combatants"].sort(key=lambda c: order.index(c["name"]))
                             st.success("Initiative set.")
@@ -733,7 +688,6 @@ if st.session_state["page"]=="GAME":
                         if cA.button("Next Turn"):
                             enc["turn_index"] = (enc["turn_index"]+1) % len(enc["combatants"])
                             if enc["turn_index"]==0: enc["round"]+=1
-                            # auto death saves at start of turn if downed PC
                             acting = enc["combatants"][enc["turn_index"]]
                             if acting["is_player"] and acting["current_hp"]==0 and not acting["dead"]:
                                 perform_death_save(acting, enc["log"])
@@ -756,7 +710,6 @@ if st.session_state["page"]=="GAME":
                                 if c["is_player"] and not c.get("dead"):
                                     cobj=st.session_state["characters"][c["name"]]
                                     cobj["current_hp"]=cobj.get("max_hp",20)
-                                    # restore slots
                                     cls=canonical_class(cobj.get("race_class"))
                                     if cls in CLASS_SLOTS:
                                         m=CLASS_SLOTS[cls]["1"]
@@ -799,28 +752,22 @@ if st.session_state["page"]=="GAME":
     col_main = st.container()
     with col_main:
         st.header("The Story Log")
-        # Show minimal story; we log mechanics below, and optional narration
-        if "history" not in st.session_state: st.session_state["history"]=[]
         for msg in st.session_state["history"][-100:]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # ---- Action Console ----
         enc=st.session_state.get("encounter")
         ch=st.session_state["characters"][st.session_state["current_player"]]
 
         st.subheader("Action Console")
-        # If in encounter, show combat actions
         if enc and enc.get("active") and enc.get("initiative"):
             acting = enc["combatants"][enc["turn_index"]]
             st.caption(f"Acting: {acting['name']} (Round {enc['round']})")
 
-            # Only allow PC actions on their turn
             if acting["is_player"] and acting["name"]==ch["name"] and not acting.get("dead"):
                 cA,cB = st.columns(2)
                 with cA:
                     st.markdown("**Attack (Weapon)**")
-                    # Choose equipped weapon in arms
                     arms=[]
                     for s in ("right_arm","left_arm"):
                         e=ch["equipped"].get(s)
@@ -850,14 +797,12 @@ if st.session_state["page"]=="GAME":
                                 if target["current_hp"]<=0: handle_ko_or_death(target, lines)
                             enc["log"].extend(lines)
                             st.session_state["history"].append({"role":"assistant","content":"\n".join(lines)})
-                            # optional narration
                             if st.session_state["use_ai_narration"]:
                                 out = ai_narrate(st.session_state["history"][-5:], st.session_state["system_instruction"])
                                 if out: st.session_state["history"].append({"role":"assistant","content": out})
                             st.session_state["_scroll_to_top"]=True; st.rerun()
 
                 with cB:
-                    # Spells
                     cls=canonical_class(ch.get("race_class"))
                     if cls in CLASS_SPELLS:
                         st.markdown("**Cast Spell (Lv1)**")
@@ -895,10 +840,8 @@ if st.session_state["page"]=="GAME":
                         st.session_state["_scroll_to_top"]=True; st.rerun()
                 with cZ:
                     if st.button("End My Turn"):
-                        # advance encounter turn
                         enc["turn_index"]=(enc["turn_index"]+1)%len(enc["combatants"])
                         if enc["turn_index"]==0: enc["round"]+=1
-                        # death save if next actor is a downed PC
                         nxt=enc["combatants"][enc["turn_index"]]
                         if nxt["is_player"] and nxt["current_hp"]==0 and not nxt.get("dead"):
                             perform_death_save(nxt, enc["log"])
@@ -906,7 +849,6 @@ if st.session_state["page"]=="GAME":
             else:
                 st.info("Not your turn or you are down/dead.")
         else:
-            # Freeform exploration / narration
             prompt = st.chat_input("What do you do?")
             with st.container():
                 st.markdown('<div class="continue-bar"></div>', unsafe_allow_html=True)
@@ -914,7 +856,6 @@ if st.session_state["page"]=="GAME":
             if (prompt is not None and prompt.strip()!="") or cont:
                 content = prompt.strip() if prompt and prompt.strip() else "(The party advances; describe the next meaningful beat.)"
                 st.session_state["history"].append({"role":"user","content":f"({st.session_state['current_player']}): {content}"})
-                # Minimal narrative or AI
                 if st.session_state["use_ai_narration"]:
                     out=ai_narrate(st.session_state["history"][-8:], st.session_state["system_instruction"])
                     st.session_state["history"].append({"role":"assistant","content": out or "(The world waits...)"})
