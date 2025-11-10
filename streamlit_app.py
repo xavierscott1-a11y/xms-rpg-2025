@@ -35,6 +35,17 @@ SETTINGS_OPTIONS = {
     "Spycraft": ["Cold War Espionage", "High-Tech Corporate Infiltration", "Shadowy Global Syndicate"],
 }
 
+# NEW: Class options tied to the general setting
+CLASS_OPTIONS = {
+    "Classic Fantasy": ["Fighter", "Wizard", "Rogue", "Cleric", "Barbarian", "Random"],
+    "Post-Apocalypse": ["Scavenger", "Mutant", "Tech Specialist", "Warlord", "Drifter", "Random"],
+    "Cyberpunk": ["Street Samurai", "Netrunner", "Corpo", "Techie", "Gang Enforcer", "Random"],
+    "Modern Fantasy": ["Occult Investigator", "Urban Shaman", "Witch", "Goth Musician", "Bouncer", "Random"],
+    "Horror": ["Skeptical Detective", "Paranoid Survivor", "Occultist", "Tough Veteran", "Innocent Victim", "Random"],
+    "Spycraft": ["Field Agent", "Hacker", "Interrogator", "Double Agent", "Analyst", "Random"],
+}
+
+
 # System Instruction Template - Set the core DM rules
 SYSTEM_INSTRUCTION_TEMPLATE = """
 You are the ultimate Dungeon Master (DM) and Storyteller, running a persistent TTRPG for {player_count} players in the **{setting}, {genre}** setting.
@@ -102,7 +113,7 @@ def get_api_contents(history_list):
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
-def create_new_character(setting, genre, player_name, custom_char_desc):
+def create_new_character(setting, genre, player_name, selected_class, custom_char_desc):
     """Function to call the API and create a character JSON."""
     
     # Check if name is provided and unique
@@ -118,8 +129,10 @@ def create_new_character(setting, genre, player_name, custom_char_desc):
         custom_setting_description=st.session_state['custom_setting_description']
     )
     
+    # Pass the selected class into the creation prompt
     creation_prompt = f"""
-    Based on the setting: {setting}, genre: {genre}, and the player's custom background, create a starting character named {player_name}.
+    Based on the setting: {setting}, genre: {genre}. Create a starting character named {player_name}.
+    The character's primary role must be: {selected_class}.
     Player's Custom Description: {custom_char_desc}
     The character should be balanced, attribute modifiers should range from -1 to +3, starting HP should be 20, and Morale/Sanity must start at 100.
     Fill in ALL fields in the required JSON schema.
@@ -153,10 +166,11 @@ def create_new_character(setting, genre, player_name, custom_char_desc):
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
     # --- FINAL CLEANUP AND RERUN ---
-    # This must be done at the very end of the function to trigger the page update
+    # Clear the input fields regardless of success/failure to prevent subsequent errors
     st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
     st.session_state["custom_character_description"] = "" # Clear description
-    st.rerun()
+    
+    st.rerun() 
 
 
 def extract_roll(text):
@@ -331,7 +345,11 @@ if st.session_state["page"] == "SETUP":
     with col_char_creation:
         st.subheader("New Character")
         
-        # Use st.session_state["new_player_name_input_setup_value"] for clearing the input
+        # New: Class selection dropdown
+        selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
+        selected_class = st.selectbox("Choose Class", selected_class_list, key="setup_class")
+        
+        # Character Name input uses the session state value for proper resetting
         new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
         # Display roster summary
@@ -355,9 +373,9 @@ if st.session_state["page"] == "SETUP":
                 st.session_state["setup_setting"], 
                 st.session_state["setup_genre"], 
                 st.session_state["new_player_name_input_setup"],
-                st.session_state["custom_character_description"] # Pass description to function
+                selected_class, # Pass the selected class
+                st.session_state["custom_character_description"]
             )
-            # Cleanup handled inside the function via rerun
         else:
             st.error("Please provide both a Character Name and Description.")
 
@@ -460,7 +478,6 @@ elif st.session_state["page"] == "GAME":
         st.header("The Story Log")
         
         # Display the conversation history in reverse order (newest on top)
-        # We ensure the chat messages are rendered using the correct order
         for message in reversed(st.session_state["history"]):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
