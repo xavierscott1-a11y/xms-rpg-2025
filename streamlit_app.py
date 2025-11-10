@@ -186,6 +186,12 @@ def extract_roll(text):
         return int(match.group(2))
     return None
 
+# NEW HANDLER FUNCTION
+def start_adventure_handler():
+    """Wrapper to call start_adventure with current settings."""
+    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
+
+
 def start_adventure(setting, genre):
     """Function to generate the initial narrative hook."""
     if st.session_state["current_player"] is None:
@@ -408,8 +414,9 @@ if st.session_state["page"] == "SETUP":
     
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
+        # CORRECTED BUTTON CALL
         st.button("🚀 START ADVENTURE", 
-                   on_on_click=lambda: start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"]), 
+                   on_click=start_adventure_handler, 
                    type="primary")
     else:
         st.warning("Create at least one character to start.")
@@ -420,11 +427,11 @@ if st.session_state["page"] == "SETUP":
 
 elif st.session_state["page"] == "GAME":
     
-    # --- Define the three columns ---
-    col_chat, col_stats = st.columns([5, 3]) # Center + Right Column
+    # --- Define the two main columns (Center Chat + Right Stats) ---
+    col_chat, col_stats = st.columns([5, 3]) 
     
     game_started = st.session_state["adventure_started"]
-    
+
     # ---------------------------------------------------------------------
     # NATIVE STREAMLIT SIDEBAR (For Settings and persistent visibility)
     # ---------------------------------------------------------------------
@@ -446,7 +453,6 @@ elif st.session_state["page"] == "GAME":
                 file_name="gemini_rpg_save.json",
                 mime="application/json",
             )
-    # ---------------------------------------------------------------------
 
     # =========================================================================
     # RIGHT COLUMN (Active Player Stats - FIXED VISUAL)
