@@ -97,15 +97,8 @@ RACE_MODIFIERS = {
 }
 
 # --- SRD equipment database (Lite) for Classic Fantasy ---
-# Fields:
-#   type: "weapon" | "armor" | "shield" | "gear"
-#   hands: 1 or 2 (two-handed occupies both arms)
-#   damage: "1d8", "2d6", ...
-#   properties: list[str] (e.g., finesse, heavy, versatile)
-#   armor: dict -> {"category": "light|medium|heavy", "base": int, "dex_cap": Optional[int]}
-#   ac_bonus: flat bonus (e.g., shield +2)
 SRD_ITEMS = {
-    # --- Weapons ---
+    # Weapons
     "dagger":        {"type":"weapon","hands":1,"damage":"1d4","properties":["finesse","light","thrown"]},
     "shortsword":    {"type":"weapon","hands":1,"damage":"1d6","properties":["finesse","light"]},
     "longsword":     {"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"]},
@@ -116,26 +109,23 @@ SRD_ITEMS = {
     "greatsword":    {"type":"weapon","hands":2,"damage":"2d6","properties":["heavy","two-handed"]},
     "shortbow":      {"type":"weapon","hands":2,"damage":"1d6","properties":["two-handed","ammunition","range"]},
     "longbow":       {"type":"weapon","hands":2,"damage":"1d8","properties":["heavy","two-handed","ammunition","range"]},
-
-    # --- Shields ---
+    # Shields
     "shield":        {"type":"shield","hands":1,"ac_bonus":2,"properties":["worn in one arm"]},
-
-    # --- Armor (base AC; Dex addition per category) ---
-    "leather armor":      {"type":"armor","hands":0,"armor":{"category":"light","base":11,"dex_cap":None}},
-    "studded leather":    {"type":"armor","hands":0,"armor":{"category":"light","base":12,"dex_cap":None}},
-    "chain shirt":        {"type":"armor","hands":0,"armor":{"category":"medium","base":13,"dex_cap":2}},
-    "scale mail":         {"type":"armor","hands":0,"armor":{"category":"medium","base":14,"dex_cap":2}},
-    "half plate":         {"type":"armor","hands":0,"armor":{"category":"medium","base":15,"dex_cap":2}},
-    "chain mail":         {"type":"armor","hands":0,"armor":{"category":"heavy","base":16,"dex_cap":0}},
-    "splint":             {"type":"armor","hands":0,"armor":{"category":"heavy","base":17,"dex_cap":0}},
-    "plate":              {"type":"armor","hands":0,"armor":{"category":"heavy","base":18,"dex_cap":0}},
-
-    # --- Misc gear that can be worn in slots but doesn't change AC ---
-    "boots":              {"type":"gear","hands":0,"properties":["footwear"]},
-    "cloak":              {"type":"gear","hands":0,"properties":["clothing"]},
-    "ring":               {"type":"gear","hands":0,"properties":["jewelry"]},
-    "amulet":             {"type":"gear","hands":0,"properties":["neckwear"]},
-    "helm":               {"type":"gear","hands":0,"properties":["headwear"]},
+    # Armor
+    "leather armor":   {"type":"armor","hands":0,"armor":{"category":"light","base":11,"dex_cap":None}},
+    "studded leather": {"type":"armor","hands":0,"armor":{"category":"light","base":12,"dex_cap":None}},
+    "chain shirt":     {"type":"armor","hands":0,"armor":{"category":"medium","base":13,"dex_cap":2}},
+    "scale mail":      {"type":"armor","hands":0,"armor":{"category":"medium","base":14,"dex_cap":2}},
+    "half plate":      {"type":"armor","hands":0,"armor":{"category":"medium","base":15,"dex_cap":2}},
+    "chain mail":      {"type":"armor","hands":0,"armor":{"category":"heavy","base":16,"dex_cap":0}},
+    "splint":          {"type":"armor","hands":0,"armor":{"category":"heavy","base":17,"dex_cap":0}},
+    "plate":           {"type":"armor","hands":0,"armor":{"category":"heavy","base":18,"dex_cap":0}},
+    # Flavor gear
+    "boots":           {"type":"gear","hands":0,"properties":["footwear"]},
+    "cloak":           {"type":"gear","hands":0,"properties":["clothing"]},
+    "ring":            {"type":"gear","hands":0,"properties":["jewelry"]},
+    "amulet":          {"type":"gear","hands":0,"properties":["neckwear"]},
+    "helm":            {"type":"gear","hands":0,"properties":["headwear"]},
 }
 
 def lookup_item_stats(name: str) -> Optional[Dict]:
@@ -143,7 +133,7 @@ def lookup_item_stats(name: str) -> Optional[Dict]:
     return SRD_ITEMS.get(key)
 
 def summarize_item(name: str, stats: Dict) -> str:
-    if not stats: return "—"
+    if not stats: return (name or "—")
     t = stats.get("type")
     if t == "weapon":
         props = ", ".join(stats.get("properties", [])) or "—"
@@ -283,12 +273,10 @@ def equip_to_slot(char: dict, slot: str, item_name: str):
     entry = {"item": item_name, "stats": stats or {}, "summary": summarize_item(item_name, stats or {})}
     char["equipped"][slot] = entry
 
-    # If two-handed weapon equipped in one arm, occupy both arms
+    # If two-handed weapon equipped in one arm, occupy both arms; remove shields/offhand
     if stats and stats.get("type")=="weapon" and stats.get("hands",1) == 2:
         other = "left_arm" if slot=="right_arm" else "right_arm"
-        # Clear offhand then mark both arms as holding same weapon reference
         char["equipped"][other] = entry
-        # If a shield is present on either arm, remove it
         for s in ["left_arm","right_arm"]:
             e = char["equipped"].get(s)
             if e and e.get("stats",{}).get("type")=="shield" and e is not entry:
@@ -329,8 +317,8 @@ def auto_equip_defaults(char: dict):
     if not right_two_handed and not char["equipped"]["left_arm"]:
         sh = None
         for i in inv:
-            st = lookup_item_stats(i)
-            if st and st.get("type")=="shield":
+            st_ = lookup_item_stats(i)
+            if st_ and st_.get("type")=="shield":
                 sh = i; break
         if not sh:
             sh = first_match(_SHIELD_WORDS)
@@ -361,6 +349,25 @@ def auto_equip_defaults(char: dict):
             if "ring" in i.lower() and (not char["equipped"]["right_hand"] or char["equipped"]["right_hand"]["item"].lower()!=i.lower()):
                 equip_to_slot(char,"left_hand",i); break
 
+# -------- NEW: normalization helpers to fix legacy saves --------
+def normalize_equipped_entry(entry: dict) -> Optional[dict]:
+    """Ensure equipped entry has item, stats, and summary fields."""
+    if not isinstance(entry, dict):
+        return None
+    item = entry.get("item", "")
+    stats = entry.get("stats")
+    if not stats:
+        stats = lookup_item_stats(item) or {}
+    summary = entry.get("summary") or summarize_item(item, stats)
+    return {"item": item, "stats": stats, "summary": summary}
+
+def normalize_all_equipped(char: dict):
+    """Run normalization across all slots for a character."""
+    ensure_equipped_slots(char)
+    for s in SLOTS:
+        if char["equipped"].get(s):
+            char["equipped"][s] = normalize_equipped_entry(char["equipped"][s])
+
 # --- Derived stats (AC) ---
 
 def compute_ac(char: dict) -> Tuple[int,str]:
@@ -380,7 +387,7 @@ def compute_ac(char: dict) -> Tuple[int,str]:
             source = [f"{armor_entry['item'].title()} {base}", "Dex"]
         else:
             cap = a["dex_cap"]
-            dex_add = max(min(dex, cap), -999)  # negative Dex still applies
+            dex_add = max(min(dex, cap), -999)
             source = [f"{armor_entry['item'].title()} {base}", f"Dex (max {cap})"]
     else:
         base = 10
@@ -500,6 +507,7 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
 
             ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
+            normalize_all_equipped(char_data)  # <-- NEW: normalize freshly created
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
@@ -531,7 +539,7 @@ def start_adventure(setting, genre):
         st.error("Please create at least one character before starting the adventure!")
         return
     for _n, _c in st.session_state["characters"].items():
-        ensure_equipped_slots(_c); auto_equip_defaults(_c)
+        ensure_equipped_slots(_c); auto_equip_defaults(_c); normalize_all_equipped(_c)
     intro_prompt = f"""
     Start a dramatic 3–4 paragraph introduction for {setting} / {genre}.
     Name the starting location; set vivid scene; present a clear inciting situation;
@@ -594,6 +602,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["custom_setting_description"] = d.get("custom_setting_description", "")
     for k, v in st.session_state["characters"].items():
         ensure_equipped_slots(v)
+        normalize_all_equipped(v)  # <-- NEW: normalize legacy loaded saves
     st.session_state["page"] = "GAME"
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
@@ -712,6 +721,7 @@ elif st.session_state["page"] == "GAME":
                 st.markdown("---")
                 if active_char:
                     ensure_equipped_slots(active_char)
+                    normalize_all_equipped(active_char)  # <-- NEW: normalize before rendering
                     ac_val, ac_src = compute_ac(active_char)
                     st.markdown(f"**Name:** {active_char.get('name','')}")
                     st.markdown(f"**Race:** {active_char.get('race','')}")
@@ -735,7 +745,8 @@ elif st.session_state["page"] == "GAME":
                                 # Already equipped?
                                 occupied = None
                                 for s in SLOTS:
-                                    if active_char["equipped"].get(s) and active_char["equipped"][s]["item"].lower()==item.lower():
+                                    eqs = active_char["equipped"].get(s)
+                                    if eqs and eqs.get("item","").lower()==item.lower():
                                         occupied = s; break
                                 if occupied:
                                     if st.button("Unequip", key=f"inv_unequip_{active_char['name']}_{idx}"):
@@ -744,7 +755,6 @@ elif st.session_state["page"] == "GAME":
                                 else:
                                     if st.button("Equip", key=f"inv_equip_{active_char['name']}_{idx}"):
                                         equip_to_slot(active_char, slot_key, item)
-                                        # Handle two-handed text
                                         stats = lookup_item_stats(item) or {}
                                         if stats.get("type")=="weapon" and stats.get("hands",1)==2:
                                             consume_action_and_narrate(f"({active_char['name']}) equips {item} (two-handed) and readies themselves.")
@@ -754,13 +764,14 @@ elif st.session_state["page"] == "GAME":
                     else:
                         st.caption("— (empty)")
 
-                    # Equipped with auto-derived summaries (read-only)
+                    # Equipped with auto-derived summaries (read-only) with safe fallback
                     st.markdown("**Equipped (by slot):**")
                     for s in SLOTS:
                         eq = active_char["equipped"].get(s)
                         label = SLOT_LABEL[s]
                         if eq:
-                            st.markdown(f"- **{label}:** {eq['summary']}")
+                            _summary = eq.get("summary") or summarize_item(eq.get("item",""), eq.get("stats", {}))
+                            st.markdown(f"- **{label}:** {_summary}")
                         else:
                             st.markdown(f"- **{label}:** —")
 
@@ -813,6 +824,7 @@ elif st.session_state["page"] == "GAME":
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
             ensure_equipped_slots(active_char)
+            normalize_all_equipped(active_char)
 
             if prompt and prompt.strip():
                 st.session_state["history"].append({"role":"user","content":f"({current_player_name}'s Turn): {prompt}"})
