@@ -3,6 +3,7 @@ st.set_page_config(layout="wide")
 
 import json
 import re
+import string
 from google import genai
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
@@ -128,28 +129,114 @@ SRD_ITEMS = {
     "helm":            {"type":"gear","hands":0,"properties":["headwear"]},
 }
 
+# ---- Canonicalization: aliases + fuzzy matching to SRD keys ----
+
+SRD_ALIASES = {
+    # Armor variants / common spellings
+    "leather": "leather armor",
+    "leather armour": "leather armor",
+    "studded leather armor": "studded leather",
+    "studded armour": "studded leather",
+    "chainmail": "chain mail",
+    "chain mail armor": "chain mail",
+    "chainmail armor": "chain mail",
+    "mail": "chain mail",
+    "half-plate": "half plate",
+    "breastplate": "scale mail",  # rough stand-in in our lite list
+    # Weapons spacing/synonyms
+    "long sword": "longsword",
+    "short sword": "shortsword",
+    "battle axe": "battleaxe",
+    "war hammer": "warhammer",
+    "great sword": "greatsword",
+    "great axe": "greataxe",
+    # Shields & misc
+    "buckler": "shield",
+    "helmet": "helm",
+    "chain shirt armor": "chain shirt",
+}
+
+CLEAN_WORDS_TO_DROP = set([
+    "well-made","fine","sturdy","rusty","old","new","decorated","engraved",
+    "masterwork","+1","+2","+3","+4","+5","armor","armour","of","the"
+])
+
+def _tokenize(s: str) -> List[str]:
+    s = (s or "").lower()
+    s = s.translate(str.maketrans("", "", string.punctuation))
+    return [w for w in s.split() if w and w not in CLEAN_WORDS_TO_DROP]
+
+def _canonical_alias(s: str) -> Optional[str]:
+    key = (s or "").strip().lower()
+    return SRD_ALIASES.get(key)
+
+def canonicalize_item_name(name: str) -> Optional[str]:
+    """
+    Try multiple strategies to map arbitrary names to an SRD key:
+    1) Direct match
+    2) Direct alias map
+    3) Clean + alias on cleaned
+    4) Token-based fuzzy contains: choose the SRD item whose tokens are a subset of the name tokens (prefer longest key)
+    """
+    if not name: return None
+    low = name.strip().lower()
+
+    # 1) Direct SRD match
+    if low in SRD_ITEMS: return low
+
+    # 2) Direct alias
+    ali = _canonical_alias(low)
+    if ali in SRD_ITEMS: return ali
+
+    # 3) Clean and try again
+    tokens = _tokenize(low)
+    cleaned = " ".join(tokens)
+    ali2 = _canonical_alias(cleaned)
+    if ali2 in SRD_ITEMS: return ali2
+    if cleaned in SRD_ITEMS: return cleaned
+
+    # 4) Fuzzy: SRD key tokens subset of name tokens
+    best = None
+    best_len = -1
+    name_tokens = set(tokens)
+    for key in SRD_ITEMS.keys():
+        key_tokens = set(_tokenize(key))
+        if key_tokens and key_tokens.issubset(name_tokens):
+            if len(" ".join(key_tokens)) > best_len:
+                best = key
+                best_len = len(" ".join(key_tokens))
+    return best
+
 def lookup_item_stats(name: str) -> Optional[Dict]:
-    key = (name or "").strip().lower()
-    return SRD_ITEMS.get(key)
+    """
+    Robust lookup: canonicalize then fetch SRD stats.
+    """
+    if not name: return None
+    canon = canonicalize_item_name(name)
+    if canon and canon in SRD_ITEMS:
+        return SRD_ITEMS[canon]
+    return None
 
 def summarize_item(name: str, stats: Dict) -> str:
     if not stats: return (name or "—")
+    # display canonicalized label for clarity
+    label = canonicalize_item_name(name) or name
     t = stats.get("type")
     if t == "weapon":
         props = ", ".join(stats.get("properties", [])) or "—"
         hands = stats.get("hands", 1)
-        return f"{name} — {stats.get('damage')} dmg, {props}; hands: {hands}"
+        return f"{label} — {stats.get('damage')} dmg, {props}; hands: {hands}"
     if t == "shield":
-        return f"{name} — +{stats.get('ac_bonus',0)} AC (shield)"
+        return f"{label} — +{stats.get('ac_bonus',0)} AC (shield)"
     if t == "armor":
         a = stats.get("armor", {})
         cat = a.get("category","armor")
         base = a.get("base")
         cap  = a.get("dex_cap")
         dex_text = "+ Dex" if cap is None else (f"+ Dex (max {cap})" if cap>0 else "")
-        return f"{name} — {cat} armor, AC {base}{(' ' + dex_text) if dex_text else ''}"
+        return f"{label} — {cat} armor, AC {base}{(' ' + dex_text) if dex_text else ''}"
     props = ", ".join(stats.get("properties", [])) or "—"
-    return f"{name} — {props}"
+    return f"{label} — {props}"
 
 # --- Schemas ---
 
@@ -226,7 +313,7 @@ _NECK_WORDS = ["necklace","amulet","pendant","torc"]
 _HEAD_WORDS = ["helmet","helm","diadem","crown","hat","hood","cap"]
 
 def is_match(word_list, name: str) -> bool:
-    low = name.lower()
+    low = (name or "").lower()
     return any(w in low for w in word_list)
 
 def detect_candidate_slots(item_name: str) -> List[str]:
@@ -260,15 +347,21 @@ def unequip_slot(char: dict, slot: str):
 
 def equip_to_slot(char: dict, slot: str, item_name: str):
     """
-    Auto-populate stats from SRD database.
+    Auto-populate stats from SRD database (with canonicalization).
     Handle two-handed weapons: occupy both arms and clear conflicts (shield/offhand).
     """
     ensure_equipped_slots(char)
+
+    # normalize/canonicalize for stats
     stats = lookup_item_stats(item_name)
-    # remove this item anywhere else
+    # remove this item anywhere else (compare canonicalized name)
+    norm = (canonicalize_item_name(item_name) or item_name).lower()
     for s in SLOTS:
-        if char["equipped"].get(s) and char["equipped"][s].get("item","").lower()==item_name.lower():
-            char["equipped"][s] = None
+        eqs = char["equipped"].get(s)
+        if eqs:
+            other_norm = (canonicalize_item_name(eqs.get("item","")) or eqs.get("item","")).lower()
+            if other_norm == norm:
+                char["equipped"][s] = None
 
     entry = {"item": item_name, "stats": stats or {}, "summary": summarize_item(item_name, stats or {})}
     char["equipped"][slot] = entry
@@ -287,75 +380,78 @@ def auto_equip_defaults(char: dict):
     ensure_equipped_slots(char)
     inv = char.get("inventory", []) or []
 
-    def first_match(words):
-        for i in inv:
-            if is_match(words, i): return i
+    def first_srd_match(candidate_keys: List[str]) -> Optional[str]:
+        for raw in inv:
+            canon = canonicalize_item_name(raw)
+            if canon in candidate_keys:
+                return raw
         return None
 
-    # Body armor
+    # Body armor: prefer strongest available
     if not char["equipped"]["body"]:
-        for candidate in ["plate","splint","chain mail","half plate","scale mail","chain shirt","studded leather","leather armor"]:
-            for i in inv:
-                if candidate in i.lower():
-                    equip_to_slot(char,"body",i); break
-            if char["equipped"]["body"]: break
+        order = ["plate","splint","chain mail","half plate","scale mail","chain shirt","studded leather","leather armor"]
+        raw = first_srd_match(order)
+        if raw: equip_to_slot(char,"body",raw)
 
     # Right arm weapon
     if not char["equipped"]["right_arm"]:
-        weapon = None
-        for name in inv:
-            if lookup_item_stats(name) and lookup_item_stats(name)["type"]=="weapon":
-                weapon = name; break
-        if not weapon:
-            weapon = first_match(_WEAPON_WORDS)
-        if weapon:
-            equip_to_slot(char,"right_arm", weapon)
+        # any SRD weapon
+        chosen = None
+        for raw in inv:
+            st_ = lookup_item_stats(raw)
+            if st_ and st_.get("type")=="weapon":
+                chosen = raw; break
+        if chosen:
+            equip_to_slot(char,"right_arm", chosen)
 
-    # Left arm preference: shield if not occupied by two-handed
+    # Left arm preference: shield if not two-handed
     right = char["equipped"]["right_arm"]
     right_two_handed = bool(right and right.get("stats",{}).get("type")=="weapon" and right["stats"].get("hands",1)==2)
     if not right_two_handed and not char["equipped"]["left_arm"]:
-        sh = None
-        for i in inv:
-            st_ = lookup_item_stats(i)
+        sh_raw = None
+        for raw in inv:
+            st_ = lookup_item_stats(raw)
             if st_ and st_.get("type")=="shield":
-                sh = i; break
-        if not sh:
-            sh = first_match(_SHIELD_WORDS)
-        if sh:
-            equip_to_slot(char, "left_arm", sh)
+                sh_raw = raw; break
+        if sh_raw:
+            equip_to_slot(char, "left_arm", sh_raw)
 
     # Feet / neck / head / rings (cosmetic)
     if not char["equipped"]["feet"]:
-        for key in ["boots"]:
-            for i in inv:
-                if key in i.lower(): equip_to_slot(char,"feet",i); break
-            if char["equipped"]["feet"]: break
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if "boots" in can: equip_to_slot(char,"feet",raw); break
     if not char["equipped"]["neck"]:
-        for key in ["amulet","necklace","pendant","torc"]:
-            for i in inv:
-                if key in i.lower(): equip_to_slot(char,"neck",i); break
-            if char["equipped"]["neck"]: break
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if can in ("amulet",): equip_to_slot(char,"neck",raw); break
+            if "necklace" in can or "pendant" in can or "torc" in can:
+                equip_to_slot(char,"neck",raw); break
     if not char["equipped"]["head"]:
-        for key in ["helm","helmet","hood","cap"]:
-            for i in inv:
-                if key in i.lower(): equip_to_slot(char,"head",i); break
-            if char["equipped"]["head"]: break
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if can in ("helm",): equip_to_slot(char,"head",raw); break
+            if "helmet" in raw.lower() or "hood" in raw.lower() or "cap" in raw.lower():
+                equip_to_slot(char,"head",raw); break
     if not char["equipped"]["right_hand"]:
-        for i in inv:
-            if "ring" in i.lower(): equip_to_slot(char,"right_hand",i); break
+        for raw in inv:
+            can = canonicalize_item_name(raw) or raw.lower()
+            if "ring" in can: equip_to_slot(char,"right_hand",raw); break
     if not char["equipped"]["left_hand"]:
-        for i in inv:
-            if "ring" in i.lower() and (not char["equipped"]["right_hand"] or char["equipped"]["right_hand"]["item"].lower()!=i.lower()):
-                equip_to_slot(char,"left_hand",i); break
+        for raw in inv:
+            can = canonicalize_item_name(raw) or raw.lower()
+            if "ring" in can and (not char["equipped"]["right_hand"] or (canonicalize_item_name(char["equipped"]["right_hand"]["item"]) or "").lower()!=can):
+                equip_to_slot(char,"left_hand",raw); break
 
 # -------- Normalization helpers to fix legacy saves --------
 def normalize_equipped_entry(entry: dict) -> Optional[dict]:
-    """Ensure equipped entry has item, stats, and summary fields."""
+    """Ensure equipped entry has item, stats, and summary fields (with canonicalization)."""
     if not isinstance(entry, dict):
         return None
     item = entry.get("item", "")
-    stats = entry.get("stats") or lookup_item_stats(item) or {}
+    stats = entry.get("stats")
+    if not stats:
+        stats = lookup_item_stats(item) or {}
     summary = entry.get("summary") or summarize_item(item, stats)
     return {"item": item, "stats": stats, "summary": summary}
 
@@ -375,24 +471,23 @@ def compute_ac(char: dict) -> Tuple[int,str]:
     dex_add = dex
     source = ["Base 10"]
 
-    # Armor on body
     armor_entry = char.get("equipped",{}).get("body")
     if armor_entry and armor_entry.get("stats",{}).get("type")=="armor":
         a = armor_entry["stats"]["armor"]
         base = a["base"]
         if a["dex_cap"] is None:
             dex_add = dex
-            source = [f"{armor_entry['item'].title()} {base}", "Dex"]
+            source = [f"{(canonicalize_item_name(armor_entry['item']) or armor_entry['item']).title()} {base}", "Dex"]
         else:
             cap = a["dex_cap"]
             dex_add = max(min(dex, cap), -999)
-            source = [f"{armor_entry['item'].title()} {base}", f"Dex (max {cap})"]
+            source = [f"{(canonicalize_item_name(armor_entry['item']) or armor_entry['item']).title()} {base}", f"Dex (max {cap})"]
     else:
         base = 10
         dex_add = dex
         source = ["Base 10", "Dex"]
 
-    # Shield
+    # Shield (if any arm has shield)
     shield_bonus = 0
     for arm in ["left_arm","right_arm"]:
         e = char.get("equipped",{}).get(arm)
@@ -746,7 +841,7 @@ elif st.session_state["page"] == "GAME":
                                 occupied = None
                                 for s in SLOTS:
                                     eqs = active_char["equipped"].get(s)
-                                    if eqs and eqs.get("item","").lower()==item.lower():
+                                    if eqs and (canonicalize_item_name(eqs.get("item","")) or eqs.get("item","")).lower() == (canonicalize_item_name(item) or item).lower():
                                         occupied = s; break
                                 if occupied:
                                     if st.button("Unequip", key=f"inv_unequip_{active_char['name']}_{idx}"):
