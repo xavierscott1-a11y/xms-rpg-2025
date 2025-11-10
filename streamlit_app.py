@@ -16,6 +16,9 @@ _SIDEBAR_CSS = """
   [data-testid="stSidebar"] { width: 410px; min-width: 410px; }
 }
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
+
+/* Keep the Continue button visually close to chat input */
+div.continue-bar { margin-top: 0.5rem; }
 </style>
 """
 st.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
@@ -51,7 +54,7 @@ CLASS_OPTIONS = {
     "Cyberpunk": ["Street Samurai", "Netrunner", "Corpo", "Techie", "Gang Enforcer", "Random"],
     "Modern Fantasy": ["Occult Investigator", "Urban Shaman", "Witch", "Goth Musician", "Bouncer", "Random"],
     "Horror": ["Skeptical Detective", "Paranoid Survivor", "Occultist", "Tough Veteran", "Innocent Victim", "Random"],
-    "Spycraft": ["Field Agent", "Hacker", "Interrogator", "Double Agent", "Analyst", "Random"],
+    "Spycraft": ["Human"],  # grounded
 }
 
 DIFFICULTY_OPTIONS = {
@@ -67,11 +70,9 @@ RACE_OPTIONS = {
     "Cyberpunk": ["Human", "Cyborg", "Augmented", "Synth", "Clone"],
     "Modern Fantasy": ["Human", "Fae-touched", "Vampire", "Werewolf", "Mageborn"],
     "Horror": ["Human", "Occultist", "Touched", "Fragmented"],
-    "Spycraft": ["Human"],  # grounded setting
+    "Spycraft": ["Human"],
 }
 
-# Baseline, setting-agnostic examples. Feel free to expand.
-# Modifiers are added to the character's *_mod fields at creation time.
 RACE_MODIFIERS = {
     "Human":       {"str_mod": 0, "dex_mod": 0, "con_mod": 0, "int_mod": 0, "wis_mod": 0, "cha_mod": 0},
     "Elf":         {"dex_mod": 1, "int_mod": 1, "con_mod": -1},
@@ -227,7 +228,6 @@ def ensure_equipped_slots(char: dict):
         if char["equipped"].get(s) is None:
             char["equipped"][s] = None
         elif isinstance(char["equipped"][s], dict):
-            # add missing new fields
             char["equipped"][s].setdefault("bonuses", "")
             char["equipped"][s].setdefault("damage", "")
             char["equipped"][s].setdefault("armor_bonus", "")
@@ -333,10 +333,6 @@ def safe_model_text(resp) -> str:
 # --- Narrative “system action” helper (consumes a turn) ---
 
 def consume_action_and_narrate(action_text: str):
-    """
-    Append a 'user' message describing a non-rolled action (e.g., adjusting gear),
-    then request a narrative response immediately.
-    """
     st.session_state["history"].append({"role": "user", "content": action_text})
     try:
         final_narrative_config = GenerateContentConfig(
@@ -406,7 +402,6 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
             char_data['name'] = player_name
             char_data['race'] = race
 
-            # Ensure baseline fields and apply race mods once
             for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
                 char_data.setdefault(k, 0)
             apply_race_modifiers(char_data, race)
@@ -445,7 +440,6 @@ def start_adventure(setting, genre):
         st.error("Please create at least one character before starting the adventure!")
         return
         
-    # Auto-equip defaults for all characters at the start if any slot is empty
     for _name, _char in st.session_state["characters"].items():
         ensure_equipped_slots(_char)
         auto_equip_defaults(_char)
@@ -523,7 +517,6 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
     st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
-    # Ensure equipped slots for all characters after load
     for k, v in st.session_state["characters"].items():
         ensure_equipped_slots(v)
     st.session_state["page"] = "GAME"
@@ -608,7 +601,7 @@ if st.session_state["page"] == "SETUP":
             height=150, 
             placeholder="Example: A tall, paranoid ex-corporate security guard with a visible cybernetic eye and a strong fear of heights."
         )
-        # --- Race selection (under Character Description) ---
+        # Race selection under description
         race_choices = RACE_OPTIONS.get(st.session_state["setup_setting"], ["Human"])
         st.session_state["setup_race"] = st.selectbox("Race", race_choices, index=0)
 
@@ -691,7 +684,6 @@ elif st.session_state["page"] == "GAME":
                                 )
                             with cols[2]:
                                 slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot_choice]
-                                # Is this item already in some slot?
                                 item_occupied_slot = None
                                 for s in SLOTS:
                                     if active_char["equipped"].get(s) and active_char["equipped"][s]["item"] == item:
@@ -700,12 +692,10 @@ elif st.session_state["page"] == "GAME":
                                 if item_occupied_slot:
                                     if st.button("Unequip", key=f"unequip_btn_{active_char['name']}_{idx}"):
                                         unequip_slot(active_char, item_occupied_slot)
-                                        # Counts as a free action in UI; if you want it to consume a turn, swap to consume_action_and_narrate
                                         st.rerun()
                                 else:
                                     if st.button("Equip", key=f"equip_btn_{active_char['name']}_{idx}"):
                                         equip_to_slot(active_char, slot_key, item)
-                                        # Consumes action: narrate spending the turn equipping
                                         consume_action_and_narrate(f"({active_char['name']}) spends their turn equipping {item} to {SLOT_LABEL[slot_key]}.")
 
                     else:
@@ -719,7 +709,6 @@ elif st.session_state["page"] == "GAME":
                         with st.container():
                             st.markdown(f"- **{label}:** " + (eq["item"] if eq else "—"))
                             if eq:
-                                # Editable stats for that slot
                                 c1, c2 = st.columns(2)
                                 with c1:
                                     eq["damage"] = st.text_input("Damage", value=eq.get("damage",""), key=f"{active_char['name']}_{s}_damage")
@@ -727,13 +716,11 @@ elif st.session_state["page"] == "GAME":
                                 with c2:
                                     eq["hit_bonus"] = st.text_input("Hit/Attack Bonus", value=eq.get("hit_bonus",""), key=f"{active_char['name']}_{s}_hit")
                                     eq["notes"] = st.text_input("Notes", value=eq.get("notes",""), key=f"{active_char['name']}_{s}_notes")
-                                # Update triggers an action + narration
                                 ucols = st.columns([3,2,2])
                                 with ucols[0]:
                                     st.caption(f"bonuses: {eq.get('bonuses','') or '—'}")
                                 with ucols[1]:
                                     if st.button("Update", key=f"update_slot_{active_char['name']}_{s}"):
-                                        # ensure the dict is written back (already mutating reference)
                                         consume_action_and_narrate(
                                             f"({active_char['name']}) spends their turn adjusting gear on {label}: "
                                             f"{eq['item']} (damage={eq['damage'] or '—'}, armor_bonus={eq['armor_bonus'] or '—'}, "
@@ -790,20 +777,41 @@ elif st.session_state["page"] == "GAME":
 
     # ---------------------- INPUT AREA ----------------------
     if game_started:
+        # Primary chat bar
         prompt = st.chat_input("What do you do?")
-        if prompt:
+
+        # Always-clickable continue/next button even when chat bar is empty
+        with st.container():
+            st.markdown('<div class="continue-bar"></div>', unsafe_allow_html=True)
+            continue_clicked = st.button("▶ Continue / Next scene", use_container_width=False)
+
+        # Handle interactions:
+        # Case A: User typed something -> normal flow
+        # Case B: User clicked Continue with no text -> narrative continue command
+        if (prompt is not None and prompt.strip() != "") or continue_clicked:
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
             ensure_equipped_slots(active_char)
 
-            full_prompt = f"({current_player_name}'s Turn): {prompt}"
-            st.session_state["history"].append({"role": "user", "content": full_prompt})
-            
+            # If user actually typed text, use that; otherwise inject a “continue” user command
+            if prompt is not None and prompt.strip() != "":
+                user_text = f"({current_player_name}'s Turn): {prompt}"
+                st.session_state["history"].append({"role": "user", "content": user_text})
+            else:
+                # Continue clicked with empty input
+                continue_text = (
+                    f"({current_player_name}) asks the Storyteller to continue describing the scene "
+                    f"or move forward to the next meaningful action/beat for the party."
+                )
+                st.session_state["history"].append({"role": "user", "content": continue_text})
+
             with st.spinner("The DM is thinking..."):
                 final_narrative_config = GenerateContentConfig(
                     system_instruction=st.session_state["final_system_instruction"]
                 )
-                raw_roll = extract_roll(prompt)
+
+                # If there was text, we can still detect rolls; but for pure continue, skip logic
+                raw_roll = extract_roll(prompt) if (prompt is not None and prompt.strip() != "") else None
 
                 # Equip summary with stats for the model
                 equipped_summary = {
