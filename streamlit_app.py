@@ -4,9 +4,10 @@ import json
 import re
 import string
 from google import genai
+# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
-from pydantic import BaseModel, Field
-from typing import List, Dict, Optional, Tuple
+from pydantic import BaseModel, Field # <--- CORRECTED IMPORT
+from typing import List, Dict, Optional, Tuple # Ensure all typing helpers are present
 
 # ---- Style: widen sidebar and tidy spacing ----
 st.markdown("""
@@ -32,6 +33,7 @@ try:
 except Exception as e:
     st.error(f"Error initializing Gemini Client: {e}")
     st.stop()
+
 
 # --- Game Data and Settings ---
 
@@ -375,21 +377,6 @@ def apply_race_modifiers(char_data: dict, race: str):
 
 # --- Model helpers & prompts ---
 
-SYSTEM_INSTRUCTION_TEMPLATE = """
-You are the ultimate Dungeon Master (DM) and Storyteller for {player_count} players in **{setting}, {genre}**.
-IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
-Setting Details: {custom_setting_description}
----
-Follow SRD-aligned rules (D&D 5e SRD-style, CC-BY-4.0) while keeping narration vivid:
-- Use STR for melee attack checks unless a weapon has the *finesse* property; use DEX for ranged.
-- Respect equipment stats and properties provided in the context. Two-handed weapons occupy both arms; no shield simultaneously.
-- Armor Class uses SRD-like formulas (light: base + Dex; medium: base + Dex up to +2; heavy: fixed; shield +2).
-- Spells must be class-appropriate. Wizards cast from Wizard lists; Clerics from Cleric lists. Spell slots are limited and must be consumed when casting.
-- After a skill/attack/spell resolution, include a mechanical line like:
-  "(Target AC {{dc}} vs Roll {{roll}} + Mod {{mod}} = {{total}}. {{'Success' if total >= dc else 'Failure'}})"
-Tone: immersive, tense, dramatic. Output pure narrative unless asked to produce JSON for checks.
-"""
-
 def safe_model_text(resp) -> str:
     try:
         if hasattr(resp,"text") and resp.text and resp.text.strip(): return resp.text.strip()
@@ -416,7 +403,13 @@ def consume_action_and_narrate(action_text: str):
 
 # --- Character creation / game flow ---
 
-# CORRECTED WRAPPER FUNCTION
+# WRAPPER FOR START ADVENTURE BUTTON (Corrected function call)
+def start_adventure_handler():
+    """Wrapper to call start_adventure with current settings."""
+    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
+
+
+# WRAPPER FOR ADD CHARACTER BUTTON
 def create_character_wrapper():
     """Wrapper to call the character creation function with all current state values."""
     create_new_character_handler(
@@ -428,7 +421,6 @@ def create_character_wrapper():
         st.session_state["custom_character_description"],
         st.session_state["setup_difficulty"]
     )
-
 
 def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
@@ -479,11 +471,13 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
             ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
             normalize_all_equipped(char_data)
+
             initialize_or_validate_spells(char_data)
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
-            if not st.session_state["current_player"]: st.session_state["current_player"] = player_name
+            if not st.session_state["current_player"]:
+                st.session_state["current_player"] = player_name
             
             st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
 
@@ -495,18 +489,6 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
     st.session_state["new_player_name_input_setup_value"] = ""
     st.session_state["custom_character_description"] = ""
     st.rerun() 
-
-
-def extract_roll(text):
-    """Helper function to extract a number (1-20) indicating a dice roll."""
-    match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
-    if match and 1 <= int(match.group(2)) <= 20:
-        return int(match.group(2))
-    return None
-
-def start_adventure_handler():
-    """Wrapper to call start_adventure with current settings."""
-    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
 
 
 def start_adventure(setting, genre):
@@ -616,34 +598,20 @@ st.set_page_config(layout="wide")
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
 # --- Initialize Session State (FINAL CHECK) ---
-if "history" not in st.session_state:
-    st.session_state["history"] = []
-if "characters" not in st.session_state:
-    st.session_state["characters"] = {}
-if "current_player" not in st.session_state:
-    st.session_state["current_player"] = None
-if "final_system_instruction" not in st.session_state:
-    st.session_state["final_system_instruction"] = None
-if "new_player_name" not in st.session_state: 
-    st.session_state["new_player_name"] = "" 
-if "adventure_started" not in st.session_state:
-    st.session_state["adventure_started"] = False
-if "saved_game_json" not in st.session_state:
-    st.session_state["saved_game_json"] = ""
-if "__LOAD_FLAG__" not in st.session_state:
-    st.session_state["__LOAD_FLAG__"] = False
-if "__LOAD_DATA__" not in st.session_state:
-    st.session_state["__LOAD_DATA__"] = None
-if "page" not in st.session_state: # New page management flag
-    st.session_state["page"] = "SETUP" 
-if "custom_setting_description" not in st.session_state:
-    st.session_state["custom_setting_description"] = "" 
-if "custom_character_description" not in st.session_state:
-    st.session_state["custom_character_description"] = "" 
-if "new_player_name_input_setup_value" not in st.session_state: # Used to reset input field
-    st.session_state["new_player_name_input_setup_value"] = ""
-if "setup_race" not in st.session_state:
-    st.session_state["setup_race"] = "Human" # Initialize race selector for stability
+if "history" not in st.session_state: st.session_state["history"] = []
+if "characters" not in st.session_state: st.session_state["characters"] = {}
+if "current_player" not in st.session_state: st.session_state["current_player"] = None
+if "final_system_instruction" not in st.session_state: st.session_state["final_system_instruction"] = None
+if "new_player_name" not in st.session_state: st.session_state["new_player_name"] = "" 
+if "adventure_started" not in st.session_state: st.session_state["adventure_started"] = False
+if "saved_game_json" not in st.session_state: st.session_state["saved_game_json"] = ""
+if "__LOAD_FLAG__" not in st.session_state: st.session_state["__LOAD_FLAG__"] = False
+if "__LOAD_DATA__" not in st.session_state: st.session_state["__LOAD_DATA__"] = None
+if "page" not in st.session_state: st.session_state["page"] = "SETUP" 
+if "custom_setting_description" not in st.session_state: st.session_state["custom_setting_description"] = "" 
+if "custom_character_description" not in st.session_state: st.session_state["custom_character_description"] = "" 
+if "new_player_name_input_setup_value" not in st.session_state: st.session_state["new_player_name_input_setup_value"] = ""
+if "setup_race" not in st.session_state: st.session_state["setup_race"] = "Human"
 
 
 # =========================================================================
@@ -658,13 +626,13 @@ if st.session_state["page"] == "SETUP":
     
     with col_world_settings:
         st.subheader("Core Setting")
-        selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
-        selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], key="setup_genre")
+        _ = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
+        _ = st.selectbox("Choose Genre", SETTINGS_OPTIONS[st.session_state["setup_setting"]], key="setup_genre")
         
         # Difficulty selection
         st.subheader("Difficulty")
-        selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
-        st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
+        _ = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
+        st.caption(DIFFICULTY_OPTIONS[st.session_state["setup_difficulty"]])
         
         # Load Game moved here
         st.markdown("---")
@@ -692,18 +660,14 @@ if st.session_state["page"] == "SETUP":
     with col_char_creation:
         st.subheader("New Character")
         
-        # Race selection
         race_choices = RACE_OPTIONS.get(st.session_state["setup_setting"], ["Human"])
         _ = st.selectbox("Choose Race", race_choices, key="setup_race")
         
-        # Class selection dropdown (dynamic based on setting)
         selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
-        selected_class = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
+        _ = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
         
-        # Character Name input uses the session state value for proper resetting
         new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
-        # Display roster summary
         if st.session_state["characters"]:
             st.markdown(f"**Party Roster ({len(st.session_state['characters'])}):**")
             st.markdown(f"{', '.join(st.session_state['characters'].keys())}")
@@ -719,21 +683,17 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]: # ONLY require a name
+        if st.session_state["new_player_name_input_setup"]:
             create_character_wrapper()
         else:
             st.error("Please provide a Character Name.")
-
 
     st.markdown("---")
     st.header("3. Start Game")
     
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
-        # CORRECTED BUTTON CALL
-        st.button("🚀 START ADVENTURE", 
-                   on_click=start_adventure_handler, 
-                   type="primary")
+        st.button("🚀 START ADVENTURE", on_click=start_adventure_handler, type="primary")
     else:
         st.warning("Create at least one character to start.")
 
@@ -762,16 +722,11 @@ elif st.session_state["page"] == "GAME":
         st.markdown("---")
         st.subheader("Save/Load")
         
-        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
-            pass 
+        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game): pass 
         
         if st.session_state["saved_game_json"]:
-            st.download_button(
-                label="Download Game File",
-                data=st.session_state["saved_game_json"],
-                file_name="gemini_rpg_save.json",
-                mime="application/json",
-            )
+            st.download_button("Download Game File", st.session_state["saved_game_json"],
+                               file_name="gemini_rpg_save.json", mime="application/json")
     # ---------------------------------------------------------------------
 
     # =========================================================================
@@ -798,15 +753,16 @@ elif st.session_state["page"] == "GAME":
                 
                 st.markdown("---")
                 
-                # Display stats
                 if active_char:
                     st.subheader(active_char['name'])
-                    st.markdown(f"**Race:** {active_char.get('race', 'N/A')}") # Display Race
+                    st.markdown(f"**Race:** {active_char.get('race', 'N/A')}")
                     st.markdown(f"**Class:** {active_char['race_class']}")
-                    st.markdown(f"**HP:** {active_char['current_hp']}")
-                    st.markdown(f"**AC:** {compute_ac(active_char)[0]}")
-                    st.markdown(f"**Sanity/Morale:** {active_char['morale_sanity']}")
                     
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("HP", active_char.get('current_hp', 0))
+                    c2.metric("AC", compute_ac(active_char)[0], help=compute_ac(active_char)[1])
+                    c3.metric("Sanity", active_char.get('morale_sanity', 100))
+
                     with st.expander("Abilities & Inventory", expanded=False):
                         # Ability Scores
                         st.markdown("**Ability Modifiers**")
