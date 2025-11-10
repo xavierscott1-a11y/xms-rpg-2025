@@ -125,7 +125,6 @@ def create_new_character(setting, genre, player_name, custom_char_desc):
     Fill in ALL fields in the required JSON schema.
     """
     
-    success = False
     with st.spinner(f"Creating survivor {player_name} for {genre}..."):
         try:
             # We pass the dynamically created system instruction for the character creation call
@@ -148,20 +147,16 @@ def create_new_character(setting, genre, player_name, custom_char_desc):
                 st.session_state["current_player"] = player_name
             
             st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
-            success = True
 
         except Exception as e:
-            st.error(f"Character creation failed for {player_name}: {e}. Try a simpler name.")
+            st.error(f"Character creation failed for {player_name}: {e}. Try again in a moment.")
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
-    # --- CLEANUP AND RERUN (Final Fix) ---
-    # Clear the input fields regardless of success/failure to prevent subsequent errors
-    if "new_player_name_input_setup" in st.session_state:
-        st.session_state["new_player_name_input_setup"] = ""
-    if "custom_character_description" in st.session_state:
-        st.session_state["custom_character_description"] = ""
-    
-    st.rerun() 
+    # --- FINAL CLEANUP AND RERUN ---
+    # This must be done at the very end of the function to trigger the page update
+    st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
+    st.session_state["custom_character_description"] = "" # Clear description
+    st.rerun()
 
 
 def extract_roll(text):
@@ -300,7 +295,8 @@ if "custom_setting_description" not in st.session_state:
     st.session_state["custom_setting_description"] = "" 
 if "custom_character_description" not in st.session_state:
     st.session_state["custom_character_description"] = "" 
-
+if "new_player_name_input_setup_value" not in st.session_state: # Used to reset input field
+    st.session_state["new_player_name_input_setup_value"] = ""
 
 # =========================================================================
 # PAGE 1: SETUP VIEW
@@ -334,7 +330,9 @@ if st.session_state["page"] == "SETUP":
 
     with col_char_creation:
         st.subheader("New Character")
-        new_player_name = st.text_input("Character Name", key="new_player_name_input_setup")
+        
+        # Use st.session_state["new_player_name_input_setup_value"] for clearing the input
+        new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
         # Display roster summary
         if st.session_state["characters"]:
@@ -462,6 +460,7 @@ elif st.session_state["page"] == "GAME":
         st.header("The Story Log")
         
         # Display the conversation history in reverse order (newest on top)
+        # We ensure the chat messages are rendered using the correct order
         for message in reversed(st.session_state["history"]):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
