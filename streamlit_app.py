@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_page_config(layout="wide")
+
 import os
 import json
 import re
@@ -58,7 +60,7 @@ Setting Details: {custom_setting_description}
 ---
 Game Rules:
 1. **Free Actions:** Simple actions like looking around, dropping an item, or shouting a brief warning are **Free Actions** and do not end the player's turn or require a check. Only complex, risky, or time-consuming actions require a skill check.
-2. **Combat/Skill Check Display:** After resolving a skill check, you MUST narrate the outcome vividly. The narration should follow a mechanical summary showing the DC vs. the result. Example: "You swing your sword. (Monster AC 12 vs Roll 12 + Mod 4 = 16. Success)"
+2. **Combat/Skill Check Display:** After resolving a skill check, narrate the outcome vividly. Include a mechanical summary showing the DC vs. the result, e.g.: "You swing your sword. (Monster AC 12 vs Roll 12 + Mod 4 = 16. Success)".
 ---
 Your tone must match the genre: be immersive, tense, and dramatic.
 Your output must be pure, flowing narrative text. DO NOT include JSON unless specifically asked to perform a check.
@@ -82,7 +84,7 @@ class CharacterSheet(BaseModel):
     inventory: List[str] = Field(description="A list of 3-5 starting major gear items.")
     experience: int = Field(description="Starting experience points (always 0).")
 
-# Define Character Creation Configuration
+# Define Character Creation Configuration (base; will merge with system_instruction dynamically)
 character_creation_config = GenerateContentConfig(
     response_mime_type="application/json",
     response_schema=CharacterSheet,
@@ -101,7 +103,7 @@ class SkillCheckResolution(BaseModel):
     hp_change: int = Field(description="Damage taken or health gained. Default 0.", default=0)
     consequence_narrative: str = Field(description="Brief description of the immediate mechanical consequence.")
 
-# Define Skill Check Configuration
+# Define Skill Check Configuration (base; will merge with system_instruction dynamically)
 skill_check_config = GenerateContentConfig(
     response_mime_type="application/json",
     response_schema=SkillCheckResolution,
@@ -119,19 +121,6 @@ def get_api_contents(history_list):
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
-
-# --- Character Creation Handler (Wrapper) ---
-def create_character_wrapper():
-    """Wrapper to call the character creation function with all current state values."""
-    create_new_character_handler(
-        st.session_state["setup_setting"], 
-        st.session_state["setup_genre"], 
-        st.session_state["new_player_name_input_setup"],
-        st.session_state["setup_class"], 
-        st.session_state["custom_character_description"],
-        st.session_state["setup_difficulty"]
-    )
-
 
 def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
@@ -161,18 +150,20 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
     
     with st.spinner(f"Creating survivor {player_name} for {genre}..."):
         try:
-            # We pass the dynamically created system instruction for the character creation call
-            temp_config = GenerateContentConfig(
-                system_instruction=final_system_instruction
+            # Merge system instruction with schema for this call
+            char_config = GenerateContentConfig(
+                system_instruction=final_system_instruction,
+                response_mime_type="application/json",
+                response_schema=CharacterSheet,
             )
             
             char_response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=creation_prompt,
-                config=character_creation_config
+                config=char_config
             )
             char_data = json.loads(char_response.text)
-            char_data['name'] = player_name # Ensure the name is exactly what the user input
+            char_data['name'] = player_name  # Ensure the name is exactly what the user input
 
             # Store the character and set the active player if this is the first one
             st.session_state["final_system_instruction"] = final_system_instruction
@@ -187,8 +178,8 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
     # --- FINAL CLEANUP AND RERUN ---
-    st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
-    st.session_state["custom_character_description"] = "" # Clear description
+    st.session_state["new_player_name_input_setup_value"] = ""  # Clear input helper
+    st.session_state["custom_character_description"] = ""  # Clear description
     st.rerun() 
 
 
@@ -234,9 +225,9 @@ def start_adventure(setting, genre):
             
             st.session_state["history"] = []
             st.session_state["history"].append({"role": "assistant", "content": response.text})
-            st.session_state["adventure_started"] = True # Mark the game as started
-            st.session_state["page"] = "GAME" # Switch page to Game View
-            st.rerun() # Rerun to show the new history
+            st.session_state["adventure_started"] = True  # Mark the game as started
+            st.session_state["page"] = "GAME"  # Switch page to Game View
+            st.rerun()  # Rerun to show the new history
 
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
@@ -275,7 +266,7 @@ def load_game(uploaded_file):
             st.session_state["__LOAD_FLAG__"] = True
             
             st.success("Adventure loaded successfully! Restarting session...")
-            st.rerun() # Force a rerun to apply the staged data
+            st.rerun()  # Force a rerun to apply the staged data
 
         except Exception as e:
             st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
@@ -298,7 +289,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
     st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
-    st.session_state["page"] = "GAME" # Force game page after load
+    st.session_state["page"] = "GAME"  # Force game page after load
     
     # Clear the staging variables
     st.session_state["__LOAD_FLAG__"] = False
@@ -307,7 +298,6 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
 
 # --- Streamlit UI Setup ---
 
-st.set_page_config(layout="wide")
 st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
 
 # --- Initialize Session State (FINAL CHECK) ---
@@ -329,13 +319,13 @@ if "__LOAD_FLAG__" not in st.session_state:
     st.session_state["__LOAD_FLAG__"] = False
 if "__LOAD_DATA__" not in st.session_state:
     st.session_state["__LOAD_DATA__"] = None
-if "page" not in st.session_state: # New page management flag
+if "page" not in st.session_state:  # New page management flag
     st.session_state["page"] = "SETUP" 
 if "custom_setting_description" not in st.session_state:
     st.session_state["custom_setting_description"] = "" 
 if "custom_character_description" not in st.session_state:
     st.session_state["custom_character_description"] = "" 
-if "new_player_name_input_setup_value" not in st.session_state: # Used to reset input field
+if "new_player_name_input_setup_value" not in st.session_state:  # Used to reset input field
     st.session_state["new_player_name_input_setup_value"] = ""
 
 
@@ -408,8 +398,15 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]: # ONLY require a name
-            create_character_wrapper()
+        if st.session_state["new_player_name_input_setup"]:  # ONLY require a name
+            create_new_character_handler(
+                st.session_state["setup_setting"], 
+                st.session_state["setup_genre"], 
+                st.session_state["new_player_name_input_setup"],
+                st.session_state["setup_class"],  # Pass the selected class
+                st.session_state["custom_character_description"],
+                st.session_state["setup_difficulty"]  # Pass the selected difficulty
+            )
         else:
             st.error("Please provide a Character Name.")
 
@@ -419,10 +416,7 @@ if st.session_state["page"] == "SETUP":
     
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
-        # CORRECTED BUTTON CALL
-        st.button("🚀 START ADVENTURE", 
-                   on_click=start_adventure_handler, 
-                   type="primary")
+        st.button("🚀 START ADVENTURE", on_click=start_adventure_handler, type="primary")
     else:
         st.warning("Create at least one character to start.")
 
@@ -471,20 +465,25 @@ elif st.session_state["page"] == "GAME":
         with st.container(border=True):
             st.header("Active Player Stats")
             
-            active_char = st.session_state["characters"].get(st.session_state["current_player"])
-
             if st.session_state["characters"]:
                 player_options = list(st.session_state["characters"].keys())
                 default_index = player_options.index(st.session_state["current_player"]) if st.session_state["current_player"] in player_options else 0
-                
+
+                def _on_player_change():
+                    st.session_state["current_player"] = st.session_state["player_selector"]
+                    st.rerun()
+
                 st.selectbox(
                     "Current Turn",
                     player_options,
                     key="player_selector",
                     index=default_index,
-                    disabled=not game_started # Disable switching during core narrative responses
+                    disabled=not game_started,  # Disable switching during core narrative responses
+                    on_change=_on_player_change
                 )
-                st.session_state["current_player"] = st.session_state["player_selector"]
+
+                # Compute active_char AFTER any potential change above
+                active_char = st.session_state["characters"].get(st.session_state["current_player"])
                 
                 st.markdown("---")
                 
@@ -526,7 +525,6 @@ elif st.session_state["page"] == "GAME":
             st.session_state["history"].append({"role": "user", "content": full_prompt})
             
             # --- Start Assistant Response ---
-            
             with st.spinner("The DM is thinking..."):
                 
                 final_response_text = ""
@@ -554,35 +552,39 @@ elif st.session_state["page"] == "GAME":
                     """
                     
                     try:
-                        # 1st API Call: Logic Call (Forced JSON Output)
+                        # Include system instruction + schema for logic call
+                        logic_config = GenerateContentConfig(
+                            system_instruction=st.session_state["final_system_instruction"],
+                            response_mime_type="application/json",
+                            response_schema=SkillCheckResolution,
+                        )
+
                         logic_response = client.models.generate_content(
                             model='gemini-2.5-flash',
                             contents=logic_prompt,
-                            config=skill_check_config
+                            config=logic_config
                         )
                         
                         skill_check_outcome = json.loads(logic_response.text)
                         
-                        # Prepare the display box content
+                        # Prepare display values
                         roll = skill_check_outcome.get('player_d20_roll', 'N/A')
                         mod = skill_check_outcome.get('attribute_modifier', 'N/A')
                         total = skill_check_outcome.get('total_roll', 'N/A')
                         dc = skill_check_outcome.get('difficulty_class', 'N/A')
                         
-                        # Prepare the HTML display box
+                        # Pure HTML combat display
                         combat_display = f"""
-                        <div style='border: 2px solid green; padding: 10px; border-radius: 8px; background-color: #333333; color: white;'>
-                        **{skill_check_outcome['outcome_result'].upper()}!** ({skill_check_outcome['attribute_used']} Check)
-                        <hr style='border-top: 1px solid #555555; margin: 5px 0;'>
-                        **Roll:** {roll} + **Mod:** {mod} = **{total}** (vs **DC:** {dc})
+                        <div style="border:2px solid #2e7d32;padding:10px;border-radius:8px;background-color:#1e1e1e;color:#ffffff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+                          <div style="font-weight:700;margin-bottom:6px;">{skill_check_outcome['outcome_result'].upper()}! ({skill_check_outcome['attribute_used']} Check)</div>
+                          <hr style="border:none;border-top:1px solid #555;margin:6px 0;">
+                          <div><strong>Roll:</strong> {roll} + <strong>Mod:</strong> {mod} = <strong>{total}</strong> (vs <strong>DC:</strong> {dc})</div>
                         </div>
                         """
-                        
-                        # Display the mechanical result in the chat box
                         st.markdown(combat_display, unsafe_allow_html=True)
                         st.toast(f"Result: {skill_check_outcome['outcome_result']}")
                         
-                        # Prepare the follow-up narrative prompt
+                        # Follow-up narrative prompt
                         follow_up_prompt = f"""
                         The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
                         1. Narrate the vivid, descriptive consequence of this result.
@@ -593,16 +595,15 @@ elif st.session_state["page"] == "GAME":
                         st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
                         st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
 
-
                     except Exception as e:
                         st.error(f"Logic Call Failed: {e}")
-                        st.session_state["history"].pop() # Remove the user prompt that caused the failure
-
+                        # Remove only the last user prompt if appropriate
+                        if st.session_state["history"] and st.session_state["history"][-1]["role"] == "user":
+                            st.session_state["history"].pop()
 
                 # =========================================================================
                 # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
                 # =========================================================================
-                
                 try:
                     narrative_response = client.models.generate_content(
                         model='gemini-2.5-flash',
@@ -613,7 +614,6 @@ elif st.session_state["page"] == "GAME":
                     
                 except Exception as e:
                     final_response_text = f"Narrative API Error: {e}"
-
 
                 # 3. Update history with the DM's final response
                 if not final_response_text.startswith("Narrative API Error"):
