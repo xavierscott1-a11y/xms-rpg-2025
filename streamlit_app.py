@@ -33,7 +33,7 @@ except Exception as e:
     st.error(f"Error initializing Gemini Client: {e}")
     st.stop()
 
-# --- Game Data and Settings (SRD-Aligned) ---
+# --- Game Data and Settings ---
 
 SETTINGS_OPTIONS = {
     "Classic Fantasy": ["High Magic Quest", "Gritty Dungeon Crawl", "Political Intrigue"],
@@ -96,7 +96,6 @@ RACE_MODIFIERS = {
     "Fragmented":   {"int_mod": 1, "cha_mod": -1},
 }
 
-# --- SRD equipment database (Lite) ---
 SRD_ITEMS = {
     "dagger":           {"type":"weapon","hands":1,"damage":"1d4","properties":["finesse","light","thrown"]},
     "shortsword":       {"type":"weapon","hands":1,"damage":"1d6","properties":["finesse","light"]},
@@ -243,7 +242,7 @@ def auto_equip_defaults(char: dict):
             canon = canonicalize_item_name(raw)
             if canon in candidate_keys: return raw
         return None
-    # Auto-equip logic (armor, main weapon, shield, etc.) remains here...
+    
     if not char["equipped"]["body"]:
         order = ["plate","splint","chain mail","half plate","scale mail","chain shirt","studded leather","leather armor"]
         raw = first_srd_match(order)
@@ -262,7 +261,6 @@ def auto_equip_defaults(char: dict):
             st_ = lookup_item_stats(raw)
             if st_ and st_.get("type")=="shield": sh_raw = raw; break
         if sh_raw: equip_to_slot(char, "left_arm", sh_raw)
-    # ... (other equipment slots logic omitted for brevity, assumed to be here)
 
 def normalize_all_equipped(char: dict):
     ensure_equipped_slots(char)
@@ -418,40 +416,240 @@ def consume_action_and_narrate(action_text: str):
 
 # --- Character creation / game flow ---
 
+# CORRECTED WRAPPER FUNCTION
 def create_character_wrapper():
     """Wrapper to call the character creation function with all current state values."""
     create_new_character_handler(
         st.session_state["setup_setting"], 
         st.session_state["setup_genre"], 
-        st.session_state["setup_race"],
+        st.session_state["setup_race"], # Corrected argument order
         st.session_state["new_player_name_input_setup"],
         st.session_state["setup_class"], 
         st.session_state["custom_character_description"],
         st.session_state["setup_difficulty"]
     )
 
+
+def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
+    """Function to call the API and create a character JSON."""
+    
+    if not player_name or player_name in st.session_state["characters"]:
+        st.error("Please enter a unique name for the new character.")
+        return
+
+    # 1. Update the System Instruction with the user's choices
+    final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
+        setting=setting,
+        genre=genre,
+        player_count=len(st.session_state["characters"]) + 1,
+        custom_setting_description=st.session_state['custom_setting_description'],
+        difficulty_level=difficulty,
+        difficulty_rules=DIFFICULTY_OPTIONS[difficulty]
+    )
+    
+    creation_prompt = f"""
+    Create a starting character named {player_name} for {setting}/{genre}.
+    Class: {selected_class}. Race: {race}.
+    Description (player-provided): {custom_char_desc if custom_char_desc else "None provided; invent suitable flavor."}
+    Constraints: attribute modifiers between -1 and +3; starting HP 20; Morale/Sanity 100; inventory 3-5 items suitable for SRD fantasy.
+    Return ONLY the required JSON schema.
+    """
+    
+    with st.spinner(f"Creating survivor {player_name} for {genre}..."):
+        try:
+            temp_config = GenerateContentConfig(system_instruction=final_system_instruction,
+                                                response_mime_type="application/json",
+                                                response_schema=CharacterSheet)
+            
+            resp = client.models.generate_content(model='gemini-2.5-flash',
+                                                contents=creation_prompt,
+                                                config=temp_config)
+            raw = resp.text or ""
+            if not raw.strip():
+                st.error("Character creation returned no text.")
+                return
+            char_data = json.loads(raw)
+            char_data['name'] = player_name
+            char_data['race'] = race
+
+            for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]: char_data.setdefault(k, 0)
+            char_data['race_class'] = canonical_class(char_data.get('race_class'))
+            apply_race_modifiers(char_data, race)
+
+            ensure_equipped_slots(char_data)
+            auto_equip_defaults(char_data)
+            normalize_all_equipped(char_data)
+            initialize_or_validate_spells(char_data)
+
+            st.session_state["final_system_instruction"] = final_system_instruction
+            st.session_state["characters"][player_name] = char_data
+            if not st.session_state["current_player"]: st.session_state["current_player"] = player_name
+            
+            st.session_state["history"].append({"role": "assistant", "content": f"Player {player_name} added to the party. Ready for adventure initiation."})
+
+        except Exception as e:
+            st.error(f"Character creation failed for {player_name}: {e}. Try again in a moment.")
+            st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
+
+    # --- FINAL CLEANUP AND RERUN ---
+    st.session_state["new_player_name_input_setup_value"] = ""
+    st.session_state["custom_character_description"] = ""
+    st.rerun() 
+
+
+def extract_roll(text):
+    """Helper function to extract a number (1-20) indicating a dice roll."""
+    match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
+    if match and 1 <= int(match.group(2)) <= 20:
+        return int(match.group(2))
+    return None
+
 def start_adventure_handler():
     """Wrapper to call start_adventure with current settings."""
     start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
 
-# --- Init session state ---
-st.title("🧙 RPG Storyteller DM (SRD-Aligned)")
 
-for key, default in [
-    ("history", []), ("characters", {}), ("current_player", None),
-    ("final_system_instruction", None), ("new_player_name", ""),
-    ("adventure_started", False), ("saved_game_json", ""),
-    ("__LOAD_FLAG__", False), ("__LOAD_DATA__", None),
-    ("page", "SETUP"), ("custom_setting_description", ""),
-    ("custom_character_description", ""), ("new_player_name_input_setup_value", ""),
-    ("setup_race", None), ("setup_class", None), ("setup_difficulty", "Normal (Balanced)"),
-    ("setup_setting", "Classic Fantasy"), ("setup_genre", "High Magic Quest")
-]:
-    if key not in st.session_state: st.session_state[key] = default
+def start_adventure(setting, genre):
+    """Function to generate the initial narrative hook."""
+    if st.session_state["current_player"] is None:
+        st.error("Please create at least one character before starting the adventure!")
+        return
+        
+    intro_prompt = f"""
+    The game is about to begin. The setting is {setting}, {genre}. 
+    Provide a dramatic and engaging introductory narrative (about 3-4 paragraphs). 
+    This introduction should:
+    1. Name the starting location (e.g., 'The Whispering Alley').
+    2. Describe the scenery vividly.
+    3. Present an immediate, intriguing event or challenge (the hook) that requires the players to act.
+    4. End by asking the active player, {st.session_state['current_player']}, what they do next.
+    """
+    
+    with st.spinner("Generating epic adventure hook..."):
+        try:
+            final_narrative_config = GenerateContentConfig(
+                system_instruction=st.session_state["final_system_instruction"]
+            )
+            
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=intro_prompt,
+                config=final_narrative_config
+            )
+            
+            st.session_state["history"] = []
+            st.session_state["history"].append({"role": "assistant", "content": safe_model_text(response)})
+            st.session_state["adventure_started"] = True # Mark the game as started
+            st.session_state["page"] = "GAME" # Switch page to Game View
+            st.rerun() # Rerun to show the new history
+
+        except Exception as e:
+            st.error(f"Failed to start adventure: {e}")
+
+def save_game():
+    """Saves the essential game state to Streamlit's file system as JSON."""
+    if not st.session_state["adventure_started"]:
+        st.warning("Adventure must be started to save game.")
+        return
+
+    game_state = {
+        "history": st.session_state["history"],
+        "characters": st.session_state["characters"],
+        "system_instruction": st.session_state["final_system_instruction"],
+        "current_player": st.session_state["current_player"],
+        "adventure_started": st.session_state["adventure_started"],
+        # Save widget values to restore the UI
+        "setting": st.session_state["setup_setting"], 
+        "genre": st.session_state["setup_genre"],
+        "difficulty": st.session_state["setup_difficulty"],
+        "custom_setting_description": st.session_state["custom_setting_description"],
+    }
+    
+    st.session_state["saved_game_json"] = json.dumps(game_state, indent=2)
+    st.success("Game state saved to memory. Use the Download button to secure your file!")
+
+def load_game(uploaded_file):
+    """Loads game state from an uploaded file."""
+    if uploaded_file is not None:
+        try:
+            bytes_data = uploaded_file.read()
+            loaded_data = json.loads(bytes_data)
+
+            # Store data in staging variables to avoid the modification error
+            st.session_state["__LOAD_DATA__"] = loaded_data
+            st.session_state["__LOAD_FLAG__"] = True
+            
+            st.success("Adventure loaded successfully! Restarting session...")
+            st.rerun() # Force a rerun to apply the staged data
+
+        except Exception as e:
+            st.error(f"Error loading file: {e}. Please ensure the file is valid JSON.")
+
+
+# --- Check for Staged Load Data (Runs BEFORE Widgets are created) ---
+if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
+    
+    loaded_data = st.session_state["__LOAD_DATA__"]
+
+    # Apply data directly to session state before any widgets are rendered
+    st.session_state["history"] = loaded_data["history"]
+    st.session_state["characters"] = loaded_data["characters"]
+    st.session_state["final_system_instruction"] = loaded_data["system_instruction"]
+    st.session_state["current_player"] = loaded_data["current_player"]
+    st.session_state["adventure_started"] = loaded_data["adventure_started"]
+    
+    # Restore settings by setting the initial values for the selectboxes' keys
+    st.session_state["setup_setting"] = loaded_data.get("setting", "Post-Apocalypse")
+    st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
+    st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
+    st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
+    st.session_state["page"] = "GAME" # Force game page after load
+    
+    # Clear the staging variables
+    st.session_state["__LOAD_FLAG__"] = False
+    del st.session_state["__LOAD_DATA__"]
+
+
+# --- Streamlit UI Setup ---
+
+st.set_page_config(layout="wide")
+st.title("🧙 RPG Storyteller DM (Powered by Gemini)")
+
+# --- Initialize Session State (FINAL CHECK) ---
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+if "characters" not in st.session_state:
+    st.session_state["characters"] = {}
+if "current_player" not in st.session_state:
+    st.session_state["current_player"] = None
+if "final_system_instruction" not in st.session_state:
+    st.session_state["final_system_instruction"] = None
+if "new_player_name" not in st.session_state: 
+    st.session_state["new_player_name"] = "" 
+if "adventure_started" not in st.session_state:
+    st.session_state["adventure_started"] = False
+if "saved_game_json" not in st.session_state:
+    st.session_state["saved_game_json"] = ""
+if "__LOAD_FLAG__" not in st.session_state:
+    st.session_state["__LOAD_FLAG__"] = False
+if "__LOAD_DATA__" not in st.session_state:
+    st.session_state["__LOAD_DATA__"] = None
+if "page" not in st.session_state: # New page management flag
+    st.session_state["page"] = "SETUP" 
+if "custom_setting_description" not in st.session_state:
+    st.session_state["custom_setting_description"] = "" 
+if "custom_character_description" not in st.session_state:
+    st.session_state["custom_character_description"] = "" 
+if "new_player_name_input_setup_value" not in st.session_state: # Used to reset input field
+    st.session_state["new_player_name_input_setup_value"] = ""
+if "setup_race" not in st.session_state:
+    st.session_state["setup_race"] = "Human" # Initialize race selector for stability
+
 
 # =========================================================================
 # PAGE 1: SETUP VIEW
 # =========================================================================
+
 if st.session_state["page"] == "SETUP":
     
     st.header("1. Define Your Campaign World")
@@ -460,13 +658,15 @@ if st.session_state["page"] == "SETUP":
     
     with col_world_settings:
         st.subheader("Core Setting")
-        _ = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
-        _ = st.selectbox("Choose Genre", SETTINGS_OPTIONS[st.session_state["setup_setting"]], key="setup_genre")
+        selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
+        selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], key="setup_genre")
         
+        # Difficulty selection
         st.subheader("Difficulty")
-        _ = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
-        st.caption(DIFFICULTY_OPTIONS[st.session_state["setup_difficulty"]])
+        selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
+        st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
         
+        # Load Game moved here
         st.markdown("---")
         st.subheader("Load Existing Game")
         uploaded_file = st.file_uploader("Load Adventure File", type="json")
@@ -476,6 +676,7 @@ if st.session_state["page"] == "SETUP":
 
     with col_world_description:
         st.subheader("Custom World Details")
+        st.markdown("Describe the location, climate, community disposition, or any key elements you want the DM to include in the campaign.")
         st.session_state["custom_setting_description"] = st.text_area(
             "Setting Details (optional)", 
             value=st.session_state["custom_setting_description"], 
@@ -491,14 +692,18 @@ if st.session_state["page"] == "SETUP":
     with col_char_creation:
         st.subheader("New Character")
         
-        selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
-        _ = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
-        
+        # Race selection
         race_choices = RACE_OPTIONS.get(st.session_state["setup_setting"], ["Human"])
         _ = st.selectbox("Choose Race", race_choices, key="setup_race")
         
+        # Class selection dropdown (dynamic based on setting)
+        selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
+        selected_class = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
+        
+        # Character Name input uses the session state value for proper resetting
         new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
         
+        # Display roster summary
         if st.session_state["characters"]:
             st.markdown(f"**Party Roster ({len(st.session_state['characters'])}):**")
             st.markdown(f"{', '.join(st.session_state['characters'].keys())}")
@@ -514,17 +719,21 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]:
+        if st.session_state["new_player_name_input_setup"]: # ONLY require a name
             create_character_wrapper()
         else:
             st.error("Please provide a Character Name.")
+
 
     st.markdown("---")
     st.header("3. Start Game")
     
     if st.session_state["current_player"]:
         st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
-        st.button("🚀 START ADVENTURE", on_click=start_adventure_handler, type="primary")
+        # CORRECTED BUTTON CALL
+        st.button("🚀 START ADVENTURE", 
+                   on_click=start_adventure_handler, 
+                   type="primary")
     else:
         st.warning("Create at least one character to start.")
 
@@ -534,8 +743,9 @@ if st.session_state["page"] == "SETUP":
 
 elif st.session_state["page"] == "GAME":
     
-    # --- Define the two main columns (Chat + Stats/Spells) ---
+    # --- Define the two main columns (Center Chat + Right Stats) ---
     col_chat, col_stats = st.columns([5, 3]) 
+    
     game_started = st.session_state["adventure_started"]
 
     # ---------------------------------------------------------------------
@@ -552,104 +762,101 @@ elif st.session_state["page"] == "GAME":
         st.markdown("---")
         st.subheader("Save/Load")
         
-        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game): pass 
+        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
+            pass 
+        
         if st.session_state["saved_game_json"]:
-            st.download_button("Download Game File", st.session_state["saved_game_json"],
-                               file_name="gemini_rpg_save.json", mime="application/json")
+            st.download_button(
+                label="Download Game File",
+                data=st.session_state["saved_game_json"],
+                file_name="gemini_rpg_save.json",
+                mime="application/json",
+            )
     # ---------------------------------------------------------------------
 
     # =========================================================================
-    # RIGHT COLUMN (Active Player Stats, Equipment, and Spells)
+    # RIGHT COLUMN (Active Player Stats - RENDERED IN MAIN BODY)
     # =========================================================================
     with col_stats:
-        active_char = st.session_state["characters"].get(st.session_state["current_player"])
-        
-        if active_char:
-            ensure_equipped_slots(active_char)
-            normalize_all_equipped(active_char)
-            initialize_or_validate_spells(active_char)
-            active_char['race_class'] = canonical_class(active_char.get('race_class'))
-
-            ac_val, ac_src = compute_ac(active_char)
+        with st.container(border=True):
+            st.header("Active Player Stats")
             
-            # --- Primary Character Info (Top Bar) ---
-            st.header(f"{active_char.get('name','')} ({active_char.get('race_class','')})")
-            st.caption(f"Race: {active_char.get('race', '')}")
+            active_char = st.session_state["characters"].get(st.session_state["current_player"])
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("HP", active_char.get('current_hp', 0))
-            c2.metric("AC", ac_val, help=ac_src)
-            c3.metric("Sanity", active_char.get('morale_sanity', 100))
-
-            # --- Ability Scores ---
-            with st.expander("Ability Modifiers", expanded=True):
-                c1,c2,c3 = st.columns(3)
-                c1.markdown(f"**STR**: {active_char.get('str_mod', 0)}")
-                c2.markdown(f"**DEX**: {active_char.get('dex_mod', 0)}")
-                c3.markdown(f"**CON**: {active_char.get('con_mod', 0)}")
-                c4,c5,c6 = st.columns(3)
-                c4.markdown(f"**INT**: {active_char.get('int_mod', 0)}")
-                c5.markdown(f"**WIS**: {active_char.get('wis_mod', 0)}")
-                c6.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
-            
-            # --- Spellcasting ---
-            cls = canonical_class(active_char.get("race_class"))
-            class_spell_list = get_class_spell_list(cls, 1)
-            if class_spell_list:
-                with st.expander("Spellcasting (Lv1)", expanded=False):
-                    slots = active_char["spell_slots"]["1"]
-                    st.markdown(f"**Slots:** {slots['current']}/{slots['max']}")
-                    
-                    # Casting UI
-                    cA, cB = st.columns([3,1])
-                    with cA:
-                        cast_choice = st.selectbox("Cast spell", options=["—"] + active_char["spells_prepared"], key=f"cast_sel_{active_char['name']}")
-                    with cB:
-                        if st.button("Cast", key=f"cast_btn_{active_char['name']}"):
-                            if cast_choice and cast_choice != "—":
-                                if cast_spell(active_char, cast_choice):
-                                    consume_action_and_narrate(f"({active_char['name']}) casts {cast_choice}. Expend one level-1 spell slot.")
-                                else:
-                                    st.error("Cannot cast: not prepared or no slots remaining.")
-                    
-                    # Manage known spells (UI intensive)
-                    with st.expander("Manage Known & Prepared", expanded=False):
-                        new_known = st.multiselect("Known Spells", options=class_spell_list, default=[s for s in active_char["spells_known"] if s in class_spell_list], key=f"known_{active_char['name']}")
-                        limit = max(1, int(active_char.get("int_mod", 0)) + 1 if cls=="Wizard" else int(active_char.get("wis_mod", 0)) + 1)
-                        new_prepped = st.multiselect(f"Prepared Spells (max {limit})", options=new_known, default=[s for s in active_char["spells_prepared"] if s in new_known][:limit], key=f"prep_{active_char['name']}")
-                        if st.button("Save Spells", key=f"save_spells_{active_char['name']}"):
-                            active_char["spells_known"] = new_known
-                            active_char["spells_prepared"] = new_prepped[:limit]
-                            validate_spells_for_class(active_char)
-                            st.success("Spells updated.")
-
-            # --- Equipment ---
-            with st.expander("Equipment Slots", expanded=True):
-                st.markdown("**Equipped (by slot):**")
-                for s in SLOTS:
-                    eq = active_char["equipped"].get(s)
-                    label = SLOT_LABEL[s]
-                    if eq:
-                        _summary = eq.get("summary") or summarize_item(eq.get("item",""), eq.get("stats", {}))
-                        st.markdown(f"- **{label}:** {_summary}")
-                    else:
-                        st.markdown(f"- **{label}:** —")
+            if st.session_state["characters"]:
+                player_options = list(st.session_state["characters"].keys())
+                default_index = player_options.index(st.session_state["current_player"]) if st.session_state["current_player"] in player_options else 0
                 
-                # Simple Equip/Unequip UI (Only shows if there's inventory)
-                inventory_list = [item for item in active_char.get("inventory", []) if item not in [e.get("item", "") for e in active_char["equipped"].values() if e]]
-                if inventory_list:
-                    st.markdown("---")
-                    item_to_equip = st.selectbox("Item to Equip", options=["—"] + inventory_list, key=f"equip_item_{active_char['name']}")
-                    if item_to_equip != "—":
-                        candidates = detect_candidate_slots(item_to_equip)
-                        slot_choice = st.selectbox("Slot", [SLOT_LABEL[s] for s in candidates], key=f"equip_slot_{active_char['name']}")
-                        slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot_choice]
+                st.selectbox(
+                    "Current Turn",
+                    player_options,
+                    key="player_selector",
+                    index=default_index,
+                    disabled=not game_started # Disable switching during core narrative responses
+                )
+                st.session_state["current_player"] = st.session_state["player_selector"]
+                
+                st.markdown("---")
+                
+                # Display stats
+                if active_char:
+                    st.subheader(active_char['name'])
+                    st.markdown(f"**Race:** {active_char.get('race', 'N/A')}") # Display Race
+                    st.markdown(f"**Class:** {active_char['race_class']}")
+                    st.markdown(f"**HP:** {active_char['current_hp']}")
+                    st.markdown(f"**AC:** {compute_ac(active_char)[0]}")
+                    st.markdown(f"**Sanity/Morale:** {active_char['morale_sanity']}")
+                    
+                    with st.expander("Abilities & Inventory", expanded=False):
+                        # Ability Scores
+                        st.markdown("**Ability Modifiers**")
+                        c1,c2,c3 = st.columns(3); c4,c5,c6 = st.columns(3)
+                        with c1: st.markdown(f"**STR**: {active_char.get('str_mod', 0)}")
+                        with c2: st.markdown(f"**DEX**: {active_char.get('dex_mod', 0)}")
+                        with c3: st.markdown(f"**CON**: {active_char.get('con_mod', 0)}")
+                        with c4: st.markdown(f"**INT**: {active_char.get('int_mod', 0)}")
+                        with c5: st.markdown(f"**WIS**: {active_char.get('wis_mod', 0)}")
+                        with c6: st.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
                         
-                        if st.button("Equip Selected", key=f"equip_final_{active_char['name']}"):
-                            equip_to_slot(active_char, slot_key, item_to_equip)
-                            st.rerun()
-        else:
-            st.write("No active character selected.")
+                        st.markdown("---")
+                        st.markdown("**Inventory**")
+                        st.markdown(", ".join(active_char['inventory']))
+                        
+                    with st.expander("Equipment Slots & Spells", expanded=False):
+                        # Equipment
+                        st.markdown("**Equipped (by slot):**")
+                        for s in SLOTS:
+                            eq = active_char["equipped"].get(s)
+                            label = SLOT_LABEL[s]
+                            if eq:
+                                _summary = eq.get("summary") or summarize_item(eq.get("item",""), eq.get("stats", {}))
+                                st.markdown(f"- **{label}:** {_summary}")
+                            else:
+                                st.markdown(f"- **{label}:** —")
+                        
+                        st.markdown("---")
+                        # Spells (if applicable)
+                        cls = canonical_class(active_char.get("race_class"))
+                        class_spell_list = get_class_spell_list(cls, 1)
+                        if class_spell_list:
+                            slots = active_char["spell_slots"]["1"]
+                            st.subheader("Spellcasting (Lv1)")
+                            st.markdown(f"**Slots:** {slots['current']}/{slots['max']}")
+                            st.markdown(f"**Prepared:** {', '.join(active_char['spells_prepared']) or '—'}")
+
+                            # Casting UI
+                            cA, cB = st.columns([3,1])
+                            with cA:
+                                cast_choice = st.selectbox("Cast spell", options=["—"] + active_char["spells_prepared"], key=f"cast_sel_{active_char['name']}")
+                            with cB:
+                                if st.button("Cast", key=f"cast_btn_{active_char['name']}"):
+                                    if cast_choice and cast_choice != "—":
+                                        if cast_spell(active_char, cast_choice):
+                                            consume_action_and_narrate(f"({active_char['name']}) casts {cast_choice}. Expend one level-1 spell slot.")
+                                        else:
+                                            st.error("Cannot cast: not prepared or no slots remaining.")
+            else:
+                st.write("No characters created.")
 
 
     # =========================================================================
@@ -670,39 +877,58 @@ elif st.session_state["page"] == "GAME":
         prompt = st.chat_input("What do you do?")
 
         if prompt:
+            # 1. Add user message to display and history (with player name prepended)
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
             
             full_prompt = f"({current_player_name}'s Turn): {prompt}"
             st.session_state["history"].append({"role": "user", "content": full_prompt})
             
+            # --- Start Assistant Response ---
+            
             with st.spinner("The DM is thinking..."):
+                
                 final_response_text = ""
-                final_narrative_config = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"])
+                
+                final_narrative_config = GenerateContentConfig(
+                    system_instruction=st.session_state["final_system_instruction"]
+                )
+                
+                # 2. Action Detection (The Gatekeeper)
                 raw_roll = extract_roll(prompt)
 
-                # --- A) LOGIC CHECK (IF A ROLL IS DETECTED) ---
+                # =========================================================================
+                # A) LOGIC CHECK (IF A ROLL IS DETECTED)
+                # =========================================================================
                 if raw_roll is not None:
+                    st.toast(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
+                    
                     logic_prompt = f"""
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
-                    2. Equipped (by slot): {json.dumps({SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)})}
-                    3. Derived: Armor Class = {compute_ac(active_char)[0]}; Caster: {short_spellline(active_char)}
-                    4. Player Action: "{prompt}"
-                    5. Task: Determine the appropriate attribute and DC (10-20), adjusted by Difficulty. Apply SRD rules (finesse, two-handed, slots).
-                    6. Calculate result (Roll {raw_roll} + Mod). Consume spell slot if necessary.
-                    7. Return ONLY the SkillCheckResolution JSON.
+                    2. Player Action: "{prompt}"
+                    3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
+                    4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
+                    5. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
                     
                     try:
-                        logic_cfg = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"], response_mime_type="application/json", response_schema=SkillCheckResolution)
-                        lresp = client.models.generate_content(model='gemini-2.5-flash', contents=logic_prompt, config=logic_cfg)
-                        skill_check_outcome = json.loads(lresp.text)
+                        # 1st API Call: Logic Call (Forced JSON Output)
+                        logic_response = client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=logic_prompt,
+                            config=skill_check_config
+                        )
                         
-                        # Display mechanical box
-                        roll = skill_check_outcome.get('player_d20_roll', 'N/A'); mod = skill_check_outcome.get('attribute_modifier', 'N/A')
-                        total = skill_check_outcome.get('total_roll', 'N/A'); dc = skill_check_outcome.get('difficulty_class', 'N/A')
+                        skill_check_outcome = json.loads(logic_response.text)
                         
+                        # Prepare the display box content
+                        roll = skill_check_outcome.get('player_d20_roll', 'N/A')
+                        mod = skill_check_outcome.get('attribute_modifier', 'N/A')
+                        total = skill_check_outcome.get('total_roll', 'N/A')
+                        dc = skill_check_outcome.get('difficulty_class', 'N/A')
+                        
+                        # Prepare the HTML display box
                         combat_display = f"""
                         <div style='border: 2px solid green; padding: 10px; border-radius: 8px; background-color: #333333; color: white;'>
                         **{skill_check_outcome['outcome_result'].upper()}!** ({skill_check_outcome['attribute_used']} Check)
@@ -710,22 +936,32 @@ elif st.session_state["page"] == "GAME":
                         **Roll:** {roll} + **Mod:** {mod} = **{total}** (vs **DC:** {dc})
                         </div>
                         """
-                        st.session_state["history"].append({"role": "assistant", "content": combat_display}) # Add mechanics to history
                         
-                        # Prepare follow-up prompt
+                        # Display the mechanical result in the chat box
+                        st.markdown(combat_display, unsafe_allow_html=True)
+                        st.toast(f"Result: {skill_check_outcome['outcome_result']}")
+                        
+                        # Prepare the follow-up narrative prompt
                         follow_up_prompt = f"""
                         The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
-                        1. Narrate the vivid, descriptive consequence of this result (Success/Failure).
-                        2. Update the scene and ask the player what they do next.
+                        1. Narrate the vivid, descriptive consequence of this result.
+                        2. Update the scene based on the outcome and ask the player what they do next.
                         """
                         
+                        # Add the JSON resolution and follow-up prompt to history for the final narrative call
+                        st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
                         st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
+
 
                     except Exception as e:
                         st.error(f"Logic Call Failed: {e}")
-                        st.session_state["history"].pop() # Remove user prompt
+                        st.session_state["history"].pop() # Remove the user prompt that caused the failure
+
+
+                # =========================================================================
+                # B) NARRATIVE CALL (ALWAYS RUNS, or FOLLOWS UP THE LOGIC CALL)
+                # =========================================================================
                 
-                # --- B) NARRATIVE CALL (ALWAYS RUNS) ---
                 try:
                     narrative_response = client.models.generate_content(
                         model='gemini-2.5-flash',
@@ -737,8 +973,10 @@ elif st.session_state["page"] == "GAME":
                 except Exception as e:
                     final_response_text = f"Narrative API Error: {e}"
 
+
                 # 3. Update history with the DM's final response
                 if not final_response_text.startswith("Narrative API Error"):
                     st.session_state["history"].append({"role": "assistant", "content": final_response_text})
                 
+                # Force a final rerun to display the response and clear the input box
                 st.rerun()
