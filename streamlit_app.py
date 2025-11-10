@@ -427,7 +427,7 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the two main columns (Center Chat + Right Stats) ---
-    col_chat, col_stats = st.columns([5, 3]) 
+    col_chat = st.container() 
     
     game_started = st.session_state["adventure_started"]
 
