@@ -12,7 +12,7 @@ from typing import List, Dict, Optional, Tuple
 # ---- Style: widen sidebar and tidy spacing ----
 st.markdown("""
 <style>
-[data-testid="stSidebar"] { width: 520px; min-width: 520px; } /* +~10% */
+[data-testid="stSidebar"] { width: 520px; min-width: 520px; } /* wider sidebar */
 @media (max-width: 1200px) { [data-testid="stSidebar"] { width: 440px; min-width: 440px; } }
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 div.continue-bar { margin-top: 0.5rem; }
@@ -50,7 +50,7 @@ CLASS_OPTIONS = {
     "Cyberpunk": ["Street Samurai", "Netrunner", "Corpo", "Techie", "Gang Enforcer", "Random"],
     "Modern Fantasy": ["Occult Investigator", "Urban Shaman", "Witch", "Goth Musician", "Bouncer", "Random"],
     "Horror": ["Skeptical Detective", "Paranoid Survivor", "Occultist", "Tough Veteran", "Innocent Victim", "Random"],
-    "Spycraft": ["Human"],  # grounded
+    "Spycraft": ["Human"],  # grounded non-caster
 }
 
 DIFFICULTY_OPTIONS = {
@@ -142,7 +142,7 @@ SRD_ALIASES = {
     "chainmail armor": "chain mail",
     "mail": "chain mail",
     "half-plate": "half plate",
-    "breastplate": "scale mail",  # rough stand-in in our lite list
+    "breastplate": "scale mail",  # stand-in in our lite list
     # Weapons spacing/synonyms
     "long sword": "longsword",
     "short sword": "shortsword",
@@ -464,7 +464,6 @@ CLERIC_SPELLS_L1 = [
 CLASS_SPELL_LISTS = {
     "Wizard": {"1": WIZARD_SPELLS_L1},
     "Cleric": {"1": CLERIC_SPELLS_L1},
-    # You can add Bard/Sorcerer/Druid/Warlock as you add classes to CLASS_OPTIONS
 }
 
 # Simple per-class slot model (level 1 only)
@@ -476,17 +475,28 @@ CLASS_SLOT_RULES = {
 def get_class_spell_list(cls: str, level: int = 1) -> List[str]:
     return CLASS_SPELL_LISTS.get(cls, {}).get(str(level), [])
 
+# ---- Class canonicalization so subclasses/specializations still count as casters ----
+CASTER_KEYWORDS = {
+    "wizard": "Wizard",
+    "cleric": "Cleric",
+    # add more when you add their lists: "druid": "Druid", "sorcerer": "Sorcerer", etc.
+}
+def canonical_class(name: Optional[str]) -> str:
+    s = (name or "").lower()
+    for k, base in CASTER_KEYWORDS.items():
+        if k in s:
+            return base
+    return (name or "").strip().title()
+
 def initialize_spellcasting(char: dict):
     """Add spell fields if the class is a caster."""
-    cls = (char.get("race_class") or "").strip().title()
+    cls = canonical_class(char.get("race_class"))
     if cls not in CLASS_SPELL_LISTS:
-        # Non-casters: ensure empty fields for consistency
         char.setdefault("spells_known", [])
         char.setdefault("spells_prepared", [])
         char.setdefault("spell_slots", {})
         return
 
-    # Known/Prepared defaults
     char.setdefault("spells_known", [])
     char.setdefault("spells_prepared", [])
     char.setdefault("spell_slots", {})
@@ -501,7 +511,7 @@ def initialize_spellcasting(char: dict):
         base_list = get_class_spell_list(cls, 1)
         char["spells_known"] = base_list[:4]  # first four as a starter
 
-    # Prepared rules (simple):
+    # Prepared rules:
     # Wizard: prepared <= max(1, INT_mod + 1)
     # Cleric: prepared <= max(1, WIS_mod + 1)
     if not char["spells_prepared"]:
@@ -510,15 +520,13 @@ def initialize_spellcasting(char: dict):
             limit = max(1, int(char.get("int_mod", 0)) + 1)
         elif cls == "Cleric":
             limit = max(1, int(char.get("wis_mod", 0)) + 1)
-        # prepare up to 'limit' from known list (cleric normally knows all; we treat known as "available")
         char["spells_prepared"] = char["spells_known"][:limit]
 
 def validate_spells_for_class(char: dict):
     """Strip/replace illegal spells that don't fit the character's class list."""
-    cls = (char.get("race_class") or "").strip().title()
+    cls = canonical_class(char.get("race_class"))
     class_list = set(s.lower() for s in get_class_spell_list(cls, 1))
     if not class_list:
-        # Non-caster: clear spells
         char["spells_known"] = []
         char["spells_prepared"] = []
         char["spell_slots"] = {}
@@ -529,7 +537,6 @@ def validate_spells_for_class(char: dict):
     for s in char.get("spells_known", []):
         if s and s.lower() in class_list:
             known.append(s)
-    # If the model inserted illegal spells, replace them with valid ones we don't already have
     if len(known) < len(char.get("spells_known", [])):
         # add replacements until we reach original count or exhaust class list
         originals = len(char.get("spells_known", []))
@@ -538,26 +545,23 @@ def validate_spells_for_class(char: dict):
             known.append(pool.pop(0))
     char["spells_known"] = known
 
-    # Normalize prepared (subset of known); if empty or illegal, rebuild up to limit
-    prepared = [s for s in char.get("spells_prepared", []) if s in known]
+    # Prepared (subset of known); limit by class rule
     limit = 2
     if cls == "Wizard":
         limit = max(1, int(char.get("int_mod", 0)) + 1)
     elif cls == "Cleric":
         limit = max(1, int(char.get("wis_mod", 0)) + 1)
-    if len(prepared) == 0:
+    prepared = [s for s in char.get("spells_prepared", []) if s in known][:limit]
+    if not prepared:
         prepared = known[:limit]
-    else:
-        prepared = prepared[:limit]
     char["spells_prepared"] = prepared
 
-    # Ensure slots present
+    # Ensure slots present and clamped
     slots = char.setdefault("spell_slots", {})
     if "1" not in slots:
         max_slots = CLASS_SLOT_RULES.get(cls, {}).get("1", 0)
         slots["1"] = {"max": max_slots, "current": max_slots}
     else:
-        # clamp current to [0, max]
         s = slots["1"]
         s["max"] = CLASS_SLOT_RULES.get(cls, {}).get("1", s.get("max", 0))
         s["current"] = max(0, min(s.get("current", s["max"]), s["max"]))
@@ -683,6 +687,10 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
             # Ensure numeric mods exist
             for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
                 char_data.setdefault(k, 0)
+
+            # Canonicalize class for spell system visibility
+            char_data['race_class'] = canonical_class(char_data.get('race_class'))
+
             apply_race_modifiers(char_data, race)
 
             ensure_equipped_slots(char_data)
@@ -785,6 +793,8 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["setup_difficulty"] = d.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = d.get("custom_setting_description", "")
     for k, v in st.session_state["characters"].items():
+        # normalize class and systems on load
+        v['race_class'] = canonical_class(v.get('race_class'))
         ensure_equipped_slots(v)
         normalize_all_equipped(v)
         initialize_or_validate_spells(v)
@@ -907,6 +917,8 @@ elif st.session_state["page"] == "GAME":
                 if active_char:
                     ensure_equipped_slots(active_char)
                     normalize_all_equipped(active_char)
+                    # normalize class on the fly (covers old saves)
+                    active_char['race_class'] = canonical_class(active_char.get('race_class'))
                     initialize_or_validate_spells(active_char)
 
                     ac_val, ac_src = compute_ac(active_char)
@@ -973,7 +985,7 @@ elif st.session_state["page"] == "GAME":
                     with c6: st.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
 
                     # ---------- SPELLS UI ----------
-                    cls = (active_char.get("race_class") or "").strip().title()
+                    cls = canonical_class(active_char.get("race_class"))
                     class_spell_list = get_class_spell_list(cls, 1)
                     if class_spell_list:
                         st.markdown("---")
@@ -987,7 +999,7 @@ elif st.session_state["page"] == "GAME":
                                 "Known Spells",
                                 options=class_spell_list,
                                 default=[s for s in active_char["spells_known"] if s in class_spell_list],
-                                help="Choose spells your class can learn. Non-class spells are not available.",
+                                help="Choose spells your class can learn.",
                                 key=f"known_{active_char['name']}"
                             )
                             # Prepared limit
@@ -1003,7 +1015,6 @@ elif st.session_state["page"] == "GAME":
                                 default=[s for s in active_char["spells_prepared"] if s in new_known][:limit],
                                 key=f"prep_{active_char['name']}"
                             )
-                            # Save button
                             if st.button("Save Spells", key=f"save_spells_{active_char['name']}"):
                                 active_char["spells_known"] = new_known
                                 active_char["spells_prepared"] = new_prepped[:limit]
@@ -1068,6 +1079,7 @@ elif st.session_state["page"] == "GAME":
             active_char = st.session_state["characters"].get(current_player_name)
             ensure_equipped_slots(active_char)
             normalize_all_equipped(active_char)
+            active_char['race_class'] = canonical_class(active_char.get('race_class'))
             initialize_or_validate_spells(active_char)
 
             if prompt and prompt.strip():
@@ -1143,3 +1155,5 @@ elif st.session_state["page"] == "GAME":
                 except Exception as e:
                     st.session_state["history"].append({"role":"assistant","content": f"Narrative error: {e}"})
                 st.rerun()
+
+# End of file
