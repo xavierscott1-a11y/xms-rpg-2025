@@ -117,7 +117,7 @@ def get_api_contents(history_list):
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
-def create_new_character(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
+def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
     
     # Check if name is provided and unique
@@ -171,8 +171,9 @@ def create_new_character(setting, genre, player_name, selected_class, custom_cha
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
     # --- FINAL CLEANUP AND RERUN ---
-    st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
-    st.session_state["custom_character_description"] = "" # Clear description
+    # Clear the input helpers after successful/failed attempt
+    st.session_state["new_player_name_input_setup_value"] = ""
+    st.session_state["custom_character_description"] = ""
     st.rerun() 
 
 
@@ -215,7 +216,7 @@ def start_adventure(setting, genre):
             st.session_state["history"].append({"role": "assistant", "content": response.text})
             st.session_state["adventure_started"] = True # Mark the game as started
             st.session_state["page"] = "GAME" # Switch page to Game View
-            st.rerun() 
+            st.rerun() # Rerun to show the new history
 
         except Exception as e:
             st.error(f"Failed to start adventure: {e}")
@@ -337,6 +338,13 @@ if st.session_state["page"] == "SETUP":
         st.subheader("Difficulty")
         selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
         st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
+        
+        # Load Game moved here
+        st.markdown("---")
+        st.subheader("Load Existing Game")
+        uploaded_file = st.file_uploader("Load Adventure File", type="json")
+        if uploaded_file is not None and st.button("Load"):
+            load_game(uploaded_file)
 
 
     with col_world_description:
@@ -381,7 +389,7 @@ if st.session_state["page"] == "SETUP":
 
     if col_char_creation.button("Add Character to Party"):
         if st.session_state["new_player_name_input_setup"]: # ONLY require a name
-            create_new_character(
+            create_new_character_handler(
                 st.session_state["setup_setting"], 
                 st.session_state["setup_genre"], 
                 st.session_state["new_player_name_input_setup"],
@@ -419,6 +427,7 @@ elif st.session_state["page"] == "GAME":
     # LEFT COLUMN (Settings & Controls)
     # =========================================================================
     with col_settings:
+        # Applying visual separation using a border
         with st.container(border=True):
             st.header("Game Details")
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
@@ -434,7 +443,7 @@ elif st.session_state["page"] == "GAME":
             st.subheader("Save/Load")
             
             if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
-                pass
+                pass 
             
             if st.session_state["saved_game_json"]:
                 st.download_button(
@@ -443,11 +452,6 @@ elif st.session_state["page"] == "GAME":
                     file_name="gemini_rpg_save.json",
                     mime="application/json",
                 )
-
-            uploaded_file = st.file_uploader("Load Adventure File", type="json")
-            if uploaded_file is not None and st.button("Load", key="load_game_button_game"):
-                load_game(uploaded_file)
-
 
     # =========================================================================
     # RIGHT COLUMN (Active Player Stats)
