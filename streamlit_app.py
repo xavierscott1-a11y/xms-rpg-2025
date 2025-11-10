@@ -6,16 +6,17 @@ import re
 from google import genai
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict, Optional
 
-# ---- Style: widen sidebar (~25%) and adjust main area ----
+# ---- Style: widen sidebar (~10% more than before) ----
 _SIDEBAR_CSS = """
 <style>
-/* Make the sidebar wider and shift main content accordingly */
-[data-testid="stSidebar"] { width: 420px; min-width: 420px; }
+/* Wider sidebar for the character sheet */
+[data-testid="stSidebar"] { width: 480px; min-width: 480px; }
 @media (max-width: 1200px) {
-  [data-testid="stSidebar"] { width: 360px; min-width: 360px; }
+  [data-testid="stSidebar"] { width: 410px; min-width: 410px; }
 }
+/* Tighten expander body spacing a bit */
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 </style>
 """
@@ -111,74 +112,157 @@ skill_check_config = GenerateContentConfig(
     response_schema=SkillCheckResolution,
 )
 
-# --- Helpers: equipment, parsing, API text ---
+# --- Equipment system (slots + heuristics) ---
+
+SLOTS = [
+    "right_arm",  # weapon/shield
+    "left_arm",   # weapon/shield
+    "body",       # armor/clothes
+    "feet",       # boots
+    "right_hand", # ring
+    "left_hand",  # ring
+    "neck",       # necklace
+    "head",       # helmet/diadem
+]
+SLOT_LABEL = {
+    "right_arm": "Right Arm",
+    "left_arm": "Left Arm",
+    "body": "Body",
+    "feet": "Feet",
+    "right_hand": "Right Hand",
+    "left_hand": "Left Hand",
+    "neck": "Neck",
+    "head": "Head",
+}
 
 _WEAPON_WORDS = [
     "sword","dagger","axe","mace","spear","bow","crossbow","staff","club",
     "blade","hammer","sabre","saber","rapier","longsword","shortsword","katana",
-    "pistol","rifle","shotgun","smg","smg.","revolver"
+    "pistol","rifle","shotgun","smg","revolver","gun"
 ]
+_SHIELD_WORDS = ["shield","buckler","kite shield","tower shield"]
 _ARMOR_WORDS = [
     "armor","armour","leather","chain","chainmail","mail","scale","plate",
-    "breastplate","brigandine","shield","helmet","helm","vest","kevlar"
+    "breastplate","brigandine","vest","kevlar","coat","jacket","robes","robe","shirt","clothes","tunic"
 ]
+_BOOTS_WORDS = ["boots","shoes","greaves","sandals","sabatons"]
+_RING_WORDS = ["ring","band","signet"]
+_NECK_WORDS = ["necklace","amulet","pendant","torc"]
+_HEAD_WORDS = ["helmet","helm","diadem","crown","hat","hood","cap"]
 
-def is_weapon(item_name: str) -> bool:
-    name = item_name.lower()
-    return any(w in name for w in _WEAPON_WORDS)
+def is_match(word_list, name: str) -> bool:
+    low = name.lower()
+    return any(w in low for w in word_list)
 
-def is_armor(item_name: str) -> bool:
-    name = item_name.lower()
-    return any(w in name for w in _ARMOR_WORDS)
+def detect_candidate_slots(item_name: str) -> List[str]:
+    slots = []
+    if is_match(_SHIELD_WORDS, item_name):    slots += ["left_arm","right_arm"]
+    if is_match(_WEAPON_WORDS, item_name):    slots += ["right_arm","left_arm"]
+    if is_match(_ARMOR_WORDS, item_name):     slots += ["body"]
+    if is_match(_BOOTS_WORDS, item_name):     slots += ["feet"]
+    if is_match(_RING_WORDS, item_name):      slots += ["right_hand","left_hand"]
+    if is_match(_NECK_WORDS, item_name):      slots += ["neck"]
+    if is_match(_HEAD_WORDS, item_name):      slots += ["head"]
+    if not slots:
+        # Fallback: let the user choose any slot
+        slots = SLOTS.copy()
+    # Deduplicate while preserving order
+    seen = set(); ordered = []
+    for s in slots:
+        if s not in seen:
+            seen.add(s); ordered.append(s)
+    return ordered
 
 def parse_bonuses(item_name: str) -> str:
-    """
-    Quick-n-dirty bonus parser: finds things like '+1', '+2 to attack', etc.
-    If none found, empty string.
-    """
-    name = item_name
-    # Collect any +N or +N to <stat> patterns
+    """Find things like '+1', '+2 to attack', etc."""
     bonuses = []
-    for m in re.findall(r"\+\s*\d+(?:\s*(?:to|vs\.?)\s*[A-Za-z ]+)?", name):
+    for m in re.findall(r"\+\s*\d+(?:\s*(?:to|vs\.?)\s*[A-Za-z ]+)?", item_name):
         bonuses.append(m.strip())
     return ", ".join(bonuses)
 
-def ensure_equipped_field(char: dict):
-    if "equipped" not in char or not isinstance(char["equipped"], list):
-        char["equipped"] = []
+def ensure_equipped_slots(char: dict):
+    """
+    Ensure 'equipped' exists as a slot dict:
+    { slot: {"item": str, "bonuses": str} or None }
+    """
+    if "equipped" not in char or not isinstance(char["equipped"], dict):
+        char["equipped"] = {}
+    for s in SLOTS:
+        char["equipped"].setdefault(s, None)
 
-def is_item_equipped(char: dict, item_name: str) -> bool:
-    ensure_equipped_field(char)
-    return any(eq.get("item") == item_name for eq in char["equipped"])
+def unequip_slot(char: dict, slot: str):
+    ensure_equipped_slots(char)
+    char["equipped"][slot] = None
 
-def equip_item(char: dict, item_name: str, bonuses: str = ""):
-    ensure_equipped_field(char)
-    if not is_item_equipped(char, item_name):
-        if not bonuses:
-            bonuses = parse_bonuses(item_name)
-        char["equipped"].append({"item": item_name, "bonuses": bonuses})
-
-def unequip_item(char: dict, item_name: str):
-    ensure_equipped_field(char)
-    char["equipped"] = [eq for eq in char["equipped"] if eq.get("item") != item_name]
+def equip_to_slot(char: dict, slot: str, item_name: str, bonuses: Optional[str] = None):
+    ensure_equipped_slots(char)
+    if bonuses is None:
+        bonuses = parse_bonuses(item_name)
+    # Remove the same item from any other slot (avoid duplicates)
+    for s in SLOTS:
+        if char["equipped"].get(s) and char["equipped"][s]["item"] == item_name:
+            char["equipped"][s] = None
+    # Put it in the chosen slot
+    char["equipped"][slot] = {"item": item_name, "bonuses": bonuses}
 
 def auto_equip_defaults(char: dict):
     """
-    If nothing is equipped, auto-equip first weapon and first armor found in inventory.
+    Fill empty slots with sensible defaults from inventory.
+    - weapon -> right_arm
+    - shield -> left_arm
+    - armor -> body
+    - boots -> feet
+    - rings -> right_hand then left_hand
+    - necklace -> neck
+    - headwear -> head
     """
-    ensure_equipped_field(char)
-    if char["equipped"]:
-        return
+    ensure_equipped_slots(char)
     inv = char.get("inventory", []) or []
-    first_weapon = next((i for i in inv if is_weapon(i)), None)
-    first_armor  = next((i for i in inv if is_armor(i)), None)
-    if first_weapon:
-        equip_item(char, first_weapon)
-    if first_armor:
-        equip_item(char, first_armor)
+
+    def first_match(words): 
+        for i in inv:
+            if is_match(words, i):
+                return i
+        return None
+
+    if not char["equipped"]["right_arm"]:
+        w = first_match(_WEAPON_WORDS)
+        if w: equip_to_slot(char, "right_arm", w)
+    if not char["equipped"]["left_arm"]:
+        sh = first_match(_SHIELD_WORDS)
+        if sh: equip_to_slot(char, "left_arm", sh)
+
+    if not char["equipped"]["body"]:
+        a = first_match(_ARMOR_WORDS)
+        if a: equip_to_slot(char, "body", a)
+
+    if not char["equipped"]["feet"]:
+        b = first_match(_BOOTS_WORDS)
+        if b: equip_to_slot(char, "feet", b)
+
+    # Rings: try to fill right then left
+    if not char["equipped"]["right_hand"]:
+        r = first_match(_RING_WORDS)
+        if r: equip_to_slot(char, "right_hand", r)
+    if not char["equipped"]["left_hand"]:
+        # If right used the same ring name, find a different ring (best effort)
+        r2 = None
+        for i in inv:
+            if is_match(_RING_WORDS, i) and (not char["equipped"]["right_hand"] or char["equipped"]["right_hand"]["item"] != i):
+                r2 = i; break
+        if r2: equip_to_slot(char, "left_hand", r2)
+
+    if not char["equipped"]["neck"]:
+        n = first_match(_NECK_WORDS)
+        if n: equip_to_slot(char, "neck", n)
+
+    if not char["equipped"]["head"]:
+        h = first_match(_HEAD_WORDS)
+        if h: equip_to_slot(char, "head", h)
+
+# --- Model helpers ---
 
 def get_api_contents(history_list):
-    """Convert Streamlit history to Google GenAI Content list."""
     contents = []
     for msg in history_list:
         if msg.get("content") and isinstance(msg["content"], str):
@@ -187,7 +271,6 @@ def get_api_contents(history_list):
     return contents
 
 def safe_model_text(resp) -> str:
-    """Be resilient to empty .text; try common places before giving a readable fallback."""
     try:
         if hasattr(resp, "text") and resp.text and resp.text.strip():
             return resp.text.strip()
@@ -249,10 +332,10 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             char_data = json.loads(raw)
             char_data['name'] = player_name
 
-            # Ensure optional fields exist for display & auto-equip basics
-            char_data.setdefault("equipped", [])
-            for mod_key in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
-                char_data.setdefault(mod_key, 0)
+            # Ensure fields & equip slots
+            for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
+                char_data.setdefault(k, 0)
+            ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
 
             st.session_state["final_system_instruction"] = final_system_instruction
@@ -286,11 +369,10 @@ def start_adventure(setting, genre):
         st.error("Please create at least one character before starting the adventure!")
         return
         
-    # Auto-equip defaults for all characters at the start of the game if not already equipped
+    # Auto-equip defaults for all characters at the start if any slot is empty
     for _name, _char in st.session_state["characters"].items():
-        ensure_equipped_field(_char)
-        if not _char["equipped"]:
-            auto_equip_defaults(_char)
+        ensure_equipped_slots(_char)
+        auto_equip_defaults(_char)
     
     intro_prompt = f"""
     The game is about to begin. The setting is {setting}, {genre}. 
@@ -365,9 +447,9 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
     st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") 
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
-    # Ensure equipped exists for all characters after load
+    # Ensure equipped slots for all characters after load
     for k, v in st.session_state["characters"].items():
-        v.setdefault("equipped", [])
+        ensure_equipped_slots(v)
     st.session_state["page"] = "GAME"
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
@@ -506,50 +588,67 @@ elif st.session_state["page"] == "GAME":
                 active_char = st.session_state["characters"].get(st.session_state["current_player"])
                 st.markdown("---")
                 if active_char:
-                    # Ensure equipped exists & attempt default equip if somehow empty
-                    ensure_equipped_field(active_char)
-                    if not active_char["equipped"]:
-                        auto_equip_defaults(active_char)
-
+                    ensure_equipped_slots(active_char)
                     st.markdown(f"**Name:** {active_char.get('name','')}")
                     st.markdown(f"**Class:** {active_char.get('race_class','')}")
                     st.markdown(f"**HP:** {active_char.get('current_hp','')}")
                     st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
-                    
-                    # Inventory + Equip/Unequip controls
+
+                    # Inventory with slot selector + equip buttons
                     st.markdown("**Inventory:**")
                     if active_char.get("inventory"):
                         for idx, item in enumerate(active_char["inventory"]):
-                            equipped_flag = is_item_equipped(active_char, item)
-                            cols = st.columns([4,2,3])
+                            # Detect candidate slots
+                            candidates = detect_candidate_slots(item)
+                            cols = st.columns([4,3,2])
                             with cols[0]:
                                 st.markdown(f"- {item}")
                             with cols[1]:
-                                if equipped_flag:
-                                    if st.button("Unequip", key=f"unequip_{active_char['name']}_{idx}"):
-                                        unequip_item(active_char, item)
+                                slot_choice = st.selectbox(
+                                    "Slot",
+                                    [SLOT_LABEL[s] for s in candidates],
+                                    key=f"slot_select_{active_char['name']}_{idx}"
+                                )
+                            with cols[2]:
+                                slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot_choice]
+                                # Is this item already in some slot?
+                                item_occupied_slot = None
+                                for s in SLOTS:
+                                    if active_char["equipped"].get(s) and active_char["equipped"][s]["item"] == item:
+                                        item_occupied_slot = s
+                                        break
+                                if item_occupied_slot:
+                                    if st.button("Unequip", key=f"unequip_btn_{active_char['name']}_{idx}"):
+                                        unequip_slot(active_char, item_occupied_slot)
                                         st.rerun()
                                 else:
-                                    if st.button("Equip", key=f"equip_{active_char['name']}_{idx}"):
-                                        equip_item(active_char, item)  # auto-parse bonuses
+                                    if st.button("Equip", key=f"equip_btn_{active_char['name']}_{idx}"):
+                                        equip_to_slot(active_char, slot_key, item)
                                         st.rerun()
-                            with cols[2]:
-                                # Show/preview parsed bonuses (read-only hint)
-                                hint = parse_bonuses(item)
-                                if hint:
-                                    st.caption(f"bonuses: {hint}")
                     else:
                         st.caption("— (empty)")
 
-                    # Equipped Items + Bonuses
-                    st.markdown("**Equipped:**")
-                    if active_char["equipped"]:
-                        for eq_idx, eq in enumerate(active_char["equipped"]):
-                            item = eq.get("item", "Unknown item")
-                            bonuses = eq.get("bonuses", "")
-                            st.markdown(f"- {item}" + (f" _(bonuses: {bonuses})_" if bonuses else ""))
-                    else:
-                        st.caption("None equipped")
+                    # Equipped by slots
+                    st.markdown("**Equipped (by slot):**")
+                    for s in SLOTS:
+                        eq = active_char["equipped"].get(s)
+                        label = SLOT_LABEL[s]
+                        cols = st.columns([6,3,2])
+                        with cols[0]:
+                            if eq:
+                                bonuses = f" _(bonuses: {eq.get('bonuses','')})_" if eq.get("bonuses") else ""
+                                st.markdown(f"- **{label}:** {eq['item']}{bonuses}")
+                            else:
+                                st.markdown(f"- **{label}:** —")
+                        with cols[1]:
+                            if eq:
+                                st.caption("equipped")
+                            else:
+                                st.caption("")
+                        with cols[2]:
+                            if eq and st.button("Unequip", key=f"slot_unequip_{active_char['name']}_{s}"):
+                                unequip_slot(active_char, s)
+                                st.rerun()
 
                     st.markdown("---")
                     st.markdown("**Ability Modifiers**")
@@ -601,6 +700,9 @@ elif st.session_state["page"] == "GAME":
         if prompt:
             current_player_name = st.session_state["current_player"]
             active_char = st.session_state["characters"].get(current_player_name)
+            # Ensure equipped structure always exists
+            ensure_equipped_slots(active_char)
+
             full_prompt = f"({current_player_name}'s Turn): {prompt}"
             st.session_state["history"].append({"role": "user", "content": full_prompt})
             
@@ -613,13 +715,19 @@ elif st.session_state["page"] == "GAME":
                 # --- Logic call if a roll is detected ---
                 if raw_roll is not None:
                     st.toast(f"Skill Check Detected! Player {current_player_name} roll: {raw_roll}")
+
+                    # Condensed equipped summary for the model
+                    equipped_summary = {
+                        SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)
+                    }
+
                     logic_prompt = f"""
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
-                    2. Equipped Items with Bonuses: {json.dumps(active_char.get('equipped', []))}
+                    2. Equipped (by slot): {json.dumps(equipped_summary)}
                     3. Player Action: "{prompt}"
                     4. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
-                    5. Calculate the result using the player's D20 roll ({raw_roll}), the correct modifier from the character stats, and consider equipped bonuses if applicable.
+                    5. Calculate the result using the player's D20 roll ({raw_roll}), the correct modifier from the character stats, and consider equipped items' bonuses if applicable.
                     6. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
                     try:
