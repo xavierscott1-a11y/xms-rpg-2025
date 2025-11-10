@@ -120,6 +120,19 @@ def get_api_contents(history_list):
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
+# --- Character Creation Handler (Wrapper) ---
+def create_character_wrapper():
+    """Wrapper to call the character creation function with all current state values."""
+    create_new_character_handler(
+        st.session_state["setup_setting"], 
+        st.session_state["setup_genre"], 
+        st.session_state["new_player_name_input_setup"],
+        st.session_state["setup_class"], 
+        st.session_state["custom_character_description"],
+        st.session_state["setup_difficulty"]
+    )
+
+
 def create_new_character_handler(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
     
@@ -396,14 +409,7 @@ if st.session_state["page"] == "SETUP":
 
     if col_char_creation.button("Add Character to Party"):
         if st.session_state["new_player_name_input_setup"]: # ONLY require a name
-            create_new_character_handler(
-                st.session_state["setup_setting"], 
-                st.session_state["setup_genre"], 
-                st.session_state["new_player_name_input_setup"],
-                st.session_state["setup_class"], # Pass the selected class
-                st.session_state["custom_character_description"],
-                st.session_state["setup_difficulty"] # Pass the selected difficulty
-            )
+            create_character_wrapper()
         else:
             st.error("Please provide a Character Name.")
 
@@ -427,7 +433,6 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the two main columns (Center Chat + Right Stats) ---
-    # The native sidebar handles controls.
     col_chat, col_stats = st.columns([5, 3]) 
     
     game_started = st.session_state["adventure_started"]
