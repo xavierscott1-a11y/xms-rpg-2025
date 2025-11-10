@@ -3,7 +3,6 @@ import os
 import json
 import re
 from google import genai
-# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -35,7 +34,6 @@ SETTINGS_OPTIONS = {
     "Spycraft": ["Cold War Espionage", "High-Tech Corporate Infiltration", "Shadowy Global Syndicate"],
 }
 
-# NEW: Class options tied to the general setting
 CLASS_OPTIONS = {
     "Classic Fantasy": ["Fighter", "Wizard", "Rogue", "Cleric", "Barbarian", "Random"],
     "Post-Apocalypse": ["Scavenger", "Mutant", "Tech Specialist", "Warlord", "Drifter", "Random"],
@@ -45,15 +43,25 @@ CLASS_OPTIONS = {
     "Spycraft": ["Field Agent", "Hacker", "Interrogator", "Double Agent", "Analyst", "Random"],
 }
 
+DIFFICULTY_OPTIONS = {
+    "Easy (Narrative Focus)": "DC scaling is generous (max DC 15). Combat is forgiving. Puzzles are simple.",
+    "Normal (Balanced)": "Standard DC scaling (max DC 20). Balanced lethality. Moderate puzzles.",
+    "Hard (Lethal)": "DC scaling is brutal (max DC 25+). Critical failures are common. High chance of character death.",
+}
+
 
 # System Instruction Template - Set the core DM rules
 SYSTEM_INSTRUCTION_TEMPLATE = """
 You are the ultimate Dungeon Master (DM) and Storyteller, running a persistent TTRPG for {player_count} players in the **{setting}, {genre}** setting.
+Difficulty Level: {difficulty_level} - {difficulty_rules}
 IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
 Setting Details: {custom_setting_description}
 ---
+Game Rules:
+1. **Free Actions:** Simple actions like looking around, dropping an item, or shouting a brief warning are **Free Actions** and do not end the player's turn or require a check. Only complex, risky, or time-consuming actions require a skill check.
+2. **Combat/Skill Check Display:** After resolving a skill check, you MUST narrate the outcome vividly. The narration should follow a mechanical summary showing the DC vs. the result. Example: "You swing your sword. (Monster AC 12 vs Roll 12 + Mod 4 = 16. Success)"
+---
 Your tone must match the genre: be immersive, tense, and dramatic.
-When a skill check outcome (JSON) is provided to you, you must vividly integrate that exact result into the next narrative scene.
 Your output must be pure, flowing narrative text. DO NOT include JSON unless specifically asked to perform a check.
 """
 
@@ -108,12 +116,11 @@ def get_api_contents(history_list):
     contents = []
     for msg in history_list:
         if msg["content"] and isinstance(msg["content"], str):
-            # Map Streamlit's "assistant" role to the Gemini API's required "model" role
             api_role = "model" if msg["role"] == "assistant" else msg["role"]
             contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
     return contents
 
-def create_new_character(setting, genre, player_name, selected_class, custom_char_desc):
+def create_new_character(setting, genre, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
     
     # Check if name is provided and unique
@@ -126,10 +133,11 @@ def create_new_character(setting, genre, player_name, selected_class, custom_cha
         setting=setting,
         genre=genre,
         player_count=len(st.session_state["characters"]) + 1,
-        custom_setting_description=st.session_state['custom_setting_description']
+        custom_setting_description=st.session_state['custom_setting_description'],
+        difficulty_level=difficulty,
+        difficulty_rules=DIFFICULTY_OPTIONS[difficulty]
     )
     
-    # Pass the selected class into the creation prompt
     creation_prompt = f"""
     Based on the setting: {setting}, genre: {genre}. Create a starting character named {player_name}.
     The character's primary role must be: {selected_class}.
@@ -166,10 +174,8 @@ def create_new_character(setting, genre, player_name, selected_class, custom_cha
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
     # --- FINAL CLEANUP AND RERUN ---
-    # Clear the input fields regardless of success/failure to prevent subsequent errors
     st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
     st.session_state["custom_character_description"] = "" # Clear description
-    
     st.rerun() 
 
 
@@ -232,6 +238,7 @@ def save_game():
         # Save widget values to restore the UI
         "setting": st.session_state["setup_setting"], 
         "genre": st.session_state["setup_genre"],
+        "difficulty": st.session_state["setup_difficulty"], # New difficulty field
         "custom_setting_description": st.session_state["custom_setting_description"],
     }
     
@@ -271,6 +278,7 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     # Restore settings by setting the initial values for the selectboxes' keys
     st.session_state["setup_setting"] = loaded_data.get("setting", "Post-Apocalypse")
     st.session_state["setup_genre"] = loaded_data.get("genre", "Mutant Survival")
+    st.session_state["setup_difficulty"] = loaded_data.get("difficulty", "Normal (Balanced)") # Load new field
     st.session_state["custom_setting_description"] = loaded_data.get("custom_setting_description", "")
     st.session_state["page"] = "GAME" # Force game page after load
     
@@ -312,6 +320,7 @@ if "custom_character_description" not in st.session_state:
 if "new_player_name_input_setup_value" not in st.session_state: # Used to reset input field
     st.session_state["new_player_name_input_setup_value"] = ""
 
+
 # =========================================================================
 # PAGE 1: SETUP VIEW
 # =========================================================================
@@ -326,10 +335,16 @@ if st.session_state["page"] == "SETUP":
         st.subheader("Core Setting")
         selected_setting = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
         selected_genre = st.selectbox("Choose Genre", SETTINGS_OPTIONS[selected_setting], key="setup_genre")
-    
+        
+        # NEW: Difficulty selection
+        st.subheader("Difficulty")
+        selected_difficulty = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
+        st.caption(DIFFICULTY_OPTIONS[selected_difficulty])
+
+
     with col_world_description:
         st.subheader("Custom World Details")
-        st.markdown("Describe the location, climate, community disposition, or any key elements you want the DM to include in the world.")
+        st.markdown("Describe the location, climate, community disposition, or any key elements you want the DM to include in the campaign.")
         st.session_state["custom_setting_description"] = st.text_area(
             "Setting Details (optional)", 
             value=st.session_state["custom_setting_description"], 
@@ -345,9 +360,9 @@ if st.session_state["page"] == "SETUP":
     with col_char_creation:
         st.subheader("New Character")
         
-        # New: Class selection dropdown
+        # Class selection dropdown (dynamic based on setting)
         selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
-        selected_class = st.selectbox("Choose Class", selected_class_list, key="setup_class")
+        selected_class = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
         
         # Character Name input uses the session state value for proper resetting
         new_player_name = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
@@ -373,8 +388,9 @@ if st.session_state["page"] == "SETUP":
                 st.session_state["setup_setting"], 
                 st.session_state["setup_genre"], 
                 st.session_state["new_player_name_input_setup"],
-                selected_class, # Pass the selected class
-                st.session_state["custom_character_description"]
+                st.session_state["setup_class"], # Pass the selected class
+                st.session_state["custom_character_description"],
+                st.session_state["setup_difficulty"] # Pass the selected difficulty
             )
         else:
             st.error("Please provide both a Character Name and Description.")
@@ -406,9 +422,11 @@ elif st.session_state["page"] == "GAME":
     # LEFT COLUMN (Settings & Controls)
     # =========================================================================
     with col_settings:
+        # Use st.container to enforce a fixed height and internal scrolling for the left panel
         with st.container(border=True):
             st.header("Game Details")
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
             st.markdown(f"**Details:** {st.session_state.get('custom_setting_description')}")
             st.markdown("---")
             st.subheader("Roster")
@@ -519,7 +537,7 @@ elif st.session_state["page"] == "GAME":
                     RESOLVE A PLAYER ACTION:
                     1. Character Stats (JSON): {json.dumps(active_char)}
                     2. Player Action: "{prompt}"
-                    3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20). 
+                    3. Task: Determine the appropriate attribute (e.g., Dexterity) and set a reasonable Difficulty Class (DC 10-20), adjusted by the current Difficulty Level. 
                     4. Calculate the result using the player's D20 roll ({raw_roll}) and the correct modifier from the character stats.
                     5. Return ONLY the JSON object following the SkillCheckResolution schema.
                     """
@@ -534,6 +552,25 @@ elif st.session_state["page"] == "GAME":
                         
                         skill_check_outcome = json.loads(logic_response.text)
                         
+                        # Extract data for the display box
+                        roll = skill_check_outcome.get('player_d20_roll', 'N/A')
+                        mod = skill_check_outcome.get('attribute_modifier', 'N/A')
+                        total = skill_check_outcome.get('total_roll', 'N/A')
+                        dc = skill_check_outcome.get('difficulty_class', 'N/A')
+                        
+                        # Prepare the display box content
+                        combat_display = f"""
+                        <div style='border: 2px solid green; padding: 10px; border-radius: 8px; background-color: #333333; color: white;'>
+                        **{skill_check_outcome['outcome_result'].upper()}!** ({skill_check_outcome['attribute_used']} Check)
+                        <hr style='border-top: 1px solid #555555; margin: 5px 0;'>
+                        **Roll:** {roll} + **Mod:** {mod} = **{total}** (vs **DC:** {dc})
+                        </div>
+                        """
+                        
+                        # Display the mechanical result in the chat box
+                        st.markdown(combat_display, unsafe_allow_html=True)
+                        st.toast(f"Result: {skill_check_outcome['outcome_result']}")
+                        
                         # Prepare the follow-up narrative prompt
                         follow_up_prompt = f"""
                         The player {current_player_name}'s risky action was RESOLVED. The EXACT JSON outcome was: {json.dumps(skill_check_outcome)}.
@@ -544,7 +581,6 @@ elif st.session_state["page"] == "GAME":
                         # Add the JSON resolution and follow-up prompt to history for the final narrative call
                         st.session_state["history"].append({"role": "assistant", "content": f"//Mechanics: {json.dumps(skill_check_outcome)}//"})
                         st.session_state["history"].append({"role": "user", "content": follow_up_prompt})
-                        st.toast(f"Result: {skill_check_outcome['outcome_result']} (Roll: {skill_check_outcome['total_roll']} vs DC: {skill_check_outcome['difficulty_class']})")
 
 
                     except Exception as e:
