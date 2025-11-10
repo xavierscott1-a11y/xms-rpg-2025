@@ -401,6 +401,13 @@ def consume_action_and_narrate(action_text: str):
 
 # --- Character creation / game flow ---
 
+# WRAPPER FOR START ADVENTURE BUTTON (Corrected function call)
+def start_adventure_handler():
+    """Wrapper to call start_adventure with current settings."""
+    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
+
+
+# WRAPPER FOR ADD CHARACTER BUTTON
 def create_character_wrapper():
     """Wrapper to call the character creation function with all current state values."""
     create_new_character_handler(
@@ -412,7 +419,6 @@ def create_character_wrapper():
         st.session_state["custom_character_description"],
         st.session_state["setup_difficulty"]
     )
-
 
 def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
@@ -610,13 +616,21 @@ if "new_player_name" not in st.session_state: st.session_state["new_player_name"
 if "adventure_started" not in st.session_state: st.session_state["adventure_started"] = False
 if "saved_game_json" not in st.session_state: st.session_state["saved_game_json"] = ""
 if "__LOAD_FLAG__" not in st.session_state: st.session_state["__LOAD_FLAG__"] = False
-if "__LOAD_DATA__" not in st.session_state: st.session_state["__LOAD_DATA__"] = None
+if "__LOAD_DATA__" not in st.session_state: del st.session_state["__LOAD_DATA__"] # Corrected missing del
 if "page" not in st.session_state: st.session_state["page"] = "SETUP" 
 if "custom_setting_description" not in st.session_state: st.session_state["custom_setting_description"] = "" 
 if "custom_character_description" not in st.session_state: st.session_state["custom_character_description"] = "" 
 if "new_player_name_input_setup_value" not in st.session_state: st.session_state["new_player_name_input_setup_value"] = ""
 if "setup_race" not in st.session_state: st.session_state["setup_race"] = "Human" 
+if "trigger_char_creation" not in st.session_state: st.session_state["trigger_char_creation"] = False
 
+
+# --- EXECUTE STAGED ACTIONS (NEW BLOCK) ---
+if st.session_state.get("trigger_char_creation", False):
+    # Execute the creation wrapper safely (only if the button was clicked on the previous run)
+    st.session_state["trigger_char_creation"] = False
+    create_character_wrapper() # Call the handler function
+    # Note: st.rerun() is already inside the handler
 
 # =========================================================================
 # PAGE 1: SETUP VIEW
@@ -687,8 +701,10 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]: # ONLY require a name
-            create_character_wrapper()
+        if st.session_state["new_player_name_input_setup"]:
+            # SET THE FLAG INSTEAD OF CALLING THE FUNCTION DIRECTLY
+            st.session_state["trigger_char_creation"] = True
+            st.rerun() # Rerun immediately to execute the staged action
         else:
             st.error("Please provide a Character Name.")
 
