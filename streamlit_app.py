@@ -4,10 +4,9 @@ import json
 import re
 import string
 from google import genai
-# Necessary imports for structured data and content types
 from google.genai.types import Content, Part, GenerateContentConfig
-from pydantic import BaseModel, Field # <--- CORRECTED IMPORT
-from typing import List, Dict, Optional, Tuple # Ensure all typing helpers are present
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional, Tuple
 
 # ---- Style: widen sidebar and tidy spacing ----
 st.markdown("""
@@ -33,7 +32,6 @@ try:
 except Exception as e:
     st.error(f"Error initializing Gemini Client: {e}")
     st.stop()
-
 
 # --- Game Data and Settings ---
 
@@ -415,7 +413,7 @@ def create_character_wrapper():
     create_new_character_handler(
         st.session_state["setup_setting"], 
         st.session_state["setup_genre"], 
-        st.session_state["setup_race"], # Corrected argument order
+        st.session_state["setup_race"], 
         st.session_state["new_player_name_input_setup"],
         st.session_state["setup_class"], 
         st.session_state["custom_character_description"],
@@ -490,6 +488,13 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
     st.session_state["custom_character_description"] = ""
     st.rerun() 
 
+
+def extract_roll(text):
+    """Helper function to extract a number (1-20) indicating a dice roll."""
+    match = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text, re.IGNORECASE)
+    if match and 1 <= int(match.group(2)) <= 20:
+        return int(match.group(2))
+    return None
 
 def start_adventure(setting, genre):
     """Function to generate the initial narrative hook."""
@@ -611,7 +616,7 @@ if "page" not in st.session_state: st.session_state["page"] = "SETUP"
 if "custom_setting_description" not in st.session_state: st.session_state["custom_setting_description"] = "" 
 if "custom_character_description" not in st.session_state: st.session_state["custom_character_description"] = "" 
 if "new_player_name_input_setup_value" not in st.session_state: st.session_state["new_player_name_input_setup_value"] = ""
-if "setup_race" not in st.session_state: st.session_state["setup_race"] = "Human"
+if "setup_race" not in st.session_state: st.session_state["setup_race"] = "Human" 
 
 
 # =========================================================================
@@ -683,7 +688,7 @@ if st.session_state["page"] == "SETUP":
         )
 
     if col_char_creation.button("Add Character to Party"):
-        if st.session_state["new_player_name_input_setup"]:
+        if st.session_state["new_player_name_input_setup"]: # ONLY require a name
             create_character_wrapper()
         else:
             st.error("Please provide a Character Name.")
@@ -753,9 +758,10 @@ elif st.session_state["page"] == "GAME":
                 
                 st.markdown("---")
                 
+                # Display stats
                 if active_char:
                     st.subheader(active_char['name'])
-                    st.markdown(f"**Race:** {active_char.get('race', 'N/A')}")
+                    st.markdown(f"**Race:** {active_char.get('race', 'N/A')}") # Display Race
                     st.markdown(f"**Class:** {active_char['race_class']}")
                     
                     c1, c2, c3 = st.columns(3)
