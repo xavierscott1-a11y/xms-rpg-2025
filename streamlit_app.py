@@ -12,8 +12,8 @@ from typing import List, Dict, Optional, Tuple
 # ---- Style: widen sidebar and tidy spacing ----
 st.markdown("""
 <style>
-[data-testid="stSidebar"] { width: 480px; min-width: 480px; }
-@media (max-width: 1200px) { [data-testid="stSidebar"] { width: 410px; min-width: 410px; } }
+[data-testid="stSidebar"] { width: 520px; min-width: 520px; } /* +~10% */
+@media (max-width: 1200px) { [data-testid="stSidebar"] { width: 440px; min-width: 440px; } }
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 div.continue-bar { margin-top: 0.5rem; }
 small.srd-note { opacity: 0.75; display:block; margin-top:1rem; }
@@ -171,31 +171,16 @@ def _canonical_alias(s: str) -> Optional[str]:
     return SRD_ALIASES.get(key)
 
 def canonicalize_item_name(name: str) -> Optional[str]:
-    """
-    Try multiple strategies to map arbitrary names to an SRD key:
-    1) Direct match
-    2) Direct alias map
-    3) Clean + alias on cleaned
-    4) Token-based fuzzy contains: choose the SRD item whose tokens are a subset of the name tokens (prefer longest key)
-    """
     if not name: return None
     low = name.strip().lower()
-
-    # 1) Direct SRD match
     if low in SRD_ITEMS: return low
-
-    # 2) Direct alias
     ali = _canonical_alias(low)
     if ali in SRD_ITEMS: return ali
-
-    # 3) Clean and try again
     tokens = _tokenize(low)
     cleaned = " ".join(tokens)
     ali2 = _canonical_alias(cleaned)
     if ali2 in SRD_ITEMS: return ali2
     if cleaned in SRD_ITEMS: return cleaned
-
-    # 4) Fuzzy: SRD key tokens subset of name tokens
     best = None
     best_len = -1
     name_tokens = set(tokens)
@@ -208,9 +193,6 @@ def canonicalize_item_name(name: str) -> Optional[str]:
     return best
 
 def lookup_item_stats(name: str) -> Optional[Dict]:
-    """
-    Robust lookup: canonicalize then fetch SRD stats.
-    """
     if not name: return None
     canon = canonicalize_item_name(name)
     if canon and canon in SRD_ITEMS:
@@ -219,7 +201,6 @@ def lookup_item_stats(name: str) -> Optional[Dict]:
 
 def summarize_item(name: str, stats: Dict) -> str:
     if not stats: return (name or "—")
-    # display canonicalized label for clarity
     label = canonicalize_item_name(name) or name
     t = stats.get("type")
     if t == "weapon":
@@ -333,7 +314,6 @@ def detect_candidate_slots(item_name: str) -> List[str]:
     return ordered
 
 def ensure_equipped_slots(char: dict):
-    """Ensure 'equipped' dict exists and normalize record shape."""
     if "equipped" not in char or not isinstance(char["equipped"], dict):
         char["equipped"] = {}
     for s in SLOTS:
@@ -346,15 +326,8 @@ def unequip_slot(char: dict, slot: str):
     char["equipped"][slot] = None
 
 def equip_to_slot(char: dict, slot: str, item_name: str):
-    """
-    Auto-populate stats from SRD database (with canonicalization).
-    Handle two-handed weapons: occupy both arms and clear conflicts (shield/offhand).
-    """
     ensure_equipped_slots(char)
-
-    # normalize/canonicalize for stats
     stats = lookup_item_stats(item_name)
-    # remove this item anywhere else (compare canonicalized name)
     norm = (canonicalize_item_name(item_name) or item_name).lower()
     for s in SLOTS:
         eqs = char["equipped"].get(s)
@@ -362,11 +335,8 @@ def equip_to_slot(char: dict, slot: str, item_name: str):
             other_norm = (canonicalize_item_name(eqs.get("item","")) or eqs.get("item","")).lower()
             if other_norm == norm:
                 char["equipped"][s] = None
-
     entry = {"item": item_name, "stats": stats or {}, "summary": summarize_item(item_name, stats or {})}
     char["equipped"][slot] = entry
-
-    # If two-handed weapon equipped in one arm, occupy both arms; remove shields/offhand
     if stats and stats.get("type")=="weapon" and stats.get("hands",1) == 2:
         other = "left_arm" if slot=="right_arm" else "right_arm"
         char["equipped"][other] = entry
@@ -376,26 +346,19 @@ def equip_to_slot(char: dict, slot: str, item_name: str):
                 char["equipped"][s] = None
 
 def auto_equip_defaults(char: dict):
-    """Basic sensible defaults from inventory (favor SRD items when possible)."""
     ensure_equipped_slots(char)
     inv = char.get("inventory", []) or []
-
     def first_srd_match(candidate_keys: List[str]) -> Optional[str]:
         for raw in inv:
             canon = canonicalize_item_name(raw)
             if canon in candidate_keys:
                 return raw
         return None
-
-    # Body armor: prefer strongest available
     if not char["equipped"]["body"]:
         order = ["plate","splint","chain mail","half plate","scale mail","chain shirt","studded leather","leather armor"]
         raw = first_srd_match(order)
         if raw: equip_to_slot(char,"body",raw)
-
-    # Right arm weapon
     if not char["equipped"]["right_arm"]:
-        # any SRD weapon
         chosen = None
         for raw in inv:
             st_ = lookup_item_stats(raw)
@@ -403,8 +366,6 @@ def auto_equip_defaults(char: dict):
                 chosen = raw; break
         if chosen:
             equip_to_slot(char,"right_arm", chosen)
-
-    # Left arm preference: shield if not two-handed
     right = char["equipped"]["right_arm"]
     right_two_handed = bool(right and right.get("stats",{}).get("type")=="weapon" and right["stats"].get("hands",1)==2)
     if not right_two_handed and not char["equipped"]["left_arm"]:
@@ -415,8 +376,6 @@ def auto_equip_defaults(char: dict):
                 sh_raw = raw; break
         if sh_raw:
             equip_to_slot(char, "left_arm", sh_raw)
-
-    # Feet / neck / head / rings (cosmetic)
     if not char["equipped"]["feet"]:
         for raw in inv:
             can = canonicalize_item_name(raw) or ""
@@ -445,18 +404,14 @@ def auto_equip_defaults(char: dict):
 
 # -------- Normalization helpers to fix legacy saves --------
 def normalize_equipped_entry(entry: dict) -> Optional[dict]:
-    """Ensure equipped entry has item, stats, and summary fields (with canonicalization)."""
     if not isinstance(entry, dict):
         return None
     item = entry.get("item", "")
-    stats = entry.get("stats")
-    if not stats:
-        stats = lookup_item_stats(item) or {}
+    stats = entry.get("stats") or lookup_item_stats(item) or {}
     summary = entry.get("summary") or summarize_item(item, stats)
     return {"item": item, "stats": stats, "summary": summary}
 
 def normalize_all_equipped(char: dict):
-    """Run normalization across all slots for a character."""
     ensure_equipped_slots(char)
     for s in SLOTS:
         if char["equipped"].get(s):
@@ -465,12 +420,10 @@ def normalize_all_equipped(char: dict):
 # --- Derived stats (AC) ---
 
 def compute_ac(char: dict) -> Tuple[int,str]:
-    """SRD-like AC: armor base + Dex (cap by armor type) + shield."""
     dex = int(char.get("dex_mod", 0))
     base = 10
     dex_add = dex
     source = ["Base 10"]
-
     armor_entry = char.get("equipped",{}).get("body")
     if armor_entry and armor_entry.get("stats",{}).get("type")=="armor":
         a = armor_entry["stats"]["armor"]
@@ -486,8 +439,6 @@ def compute_ac(char: dict) -> Tuple[int,str]:
         base = 10
         dex_add = dex
         source = ["Base 10", "Dex"]
-
-    # Shield (if any arm has shield)
     shield_bonus = 0
     for arm in ["left_arm","right_arm"]:
         e = char.get("equipped",{}).get(arm)
@@ -495,9 +446,137 @@ def compute_ac(char: dict) -> Tuple[int,str]:
             shield_bonus = max(shield_bonus, int(e["stats"].get("ac_bonus",0)))
     if shield_bonus:
         source.append(f"Shield +{shield_bonus}")
-
     ac = base + dex_add + shield_bonus
     return ac, " + ".join(source)
+
+# ===================== SPELLS (SRD-aligned, Lv1 only for now) =====================
+
+# SRD-ish core spell lists (subset for demo; expand as needed)
+WIZARD_SPELLS_L1 = [
+    "Magic Missile", "Shield", "Mage Armor", "Thunderwave", "Chromatic Orb",
+    "Grease", "Burning Hands", "Sleep", "Detect Magic", "Identify"
+]
+CLERIC_SPELLS_L1 = [
+    "Cure Wounds", "Bless", "Shield of Faith", "Guiding Bolt", "Healing Word",
+    "Detect Evil and Good", "Sanctuary", "Inflict Wounds", "Protection from Evil and Good"
+]
+
+CLASS_SPELL_LISTS = {
+    "Wizard": {"1": WIZARD_SPELLS_L1},
+    "Cleric": {"1": CLERIC_SPELLS_L1},
+    # You can add Bard/Sorcerer/Druid/Warlock as you add classes to CLASS_OPTIONS
+}
+
+# Simple per-class slot model (level 1 only)
+CLASS_SLOT_RULES = {
+    "Wizard": {"1": 2},  # Lv1 slots
+    "Cleric": {"1": 2},
+}
+
+def get_class_spell_list(cls: str, level: int = 1) -> List[str]:
+    return CLASS_SPELL_LISTS.get(cls, {}).get(str(level), [])
+
+def initialize_spellcasting(char: dict):
+    """Add spell fields if the class is a caster."""
+    cls = (char.get("race_class") or "").strip().title()
+    if cls not in CLASS_SPELL_LISTS:
+        # Non-casters: ensure empty fields for consistency
+        char.setdefault("spells_known", [])
+        char.setdefault("spells_prepared", [])
+        char.setdefault("spell_slots", {})
+        return
+
+    # Known/Prepared defaults
+    char.setdefault("spells_known", [])
+    char.setdefault("spells_prepared", [])
+    char.setdefault("spell_slots", {})
+
+    # Initialize Lv1 slots
+    if "1" not in char["spell_slots"]:
+        max_slots = CLASS_SLOT_RULES.get(cls, {}).get("1", 0)
+        char["spell_slots"]["1"] = {"max": max_slots, "current": max_slots}
+
+    # If no known spells, seed a couple
+    if not char["spells_known"]:
+        base_list = get_class_spell_list(cls, 1)
+        char["spells_known"] = base_list[:4]  # first four as a starter
+
+    # Prepared rules (simple):
+    # Wizard: prepared <= max(1, INT_mod + 1)
+    # Cleric: prepared <= max(1, WIS_mod + 1)
+    if not char["spells_prepared"]:
+        limit = 2
+        if cls == "Wizard":
+            limit = max(1, int(char.get("int_mod", 0)) + 1)
+        elif cls == "Cleric":
+            limit = max(1, int(char.get("wis_mod", 0)) + 1)
+        # prepare up to 'limit' from known list (cleric normally knows all; we treat known as "available")
+        char["spells_prepared"] = char["spells_known"][:limit]
+
+def validate_spells_for_class(char: dict):
+    """Strip/replace illegal spells that don't fit the character's class list."""
+    cls = (char.get("race_class") or "").strip().title()
+    class_list = set(s.lower() for s in get_class_spell_list(cls, 1))
+    if not class_list:
+        # Non-caster: clear spells
+        char["spells_known"] = []
+        char["spells_prepared"] = []
+        char["spell_slots"] = {}
+        return
+
+    # Normalize known
+    known = []
+    for s in char.get("spells_known", []):
+        if s and s.lower() in class_list:
+            known.append(s)
+    # If the model inserted illegal spells, replace them with valid ones we don't already have
+    if len(known) < len(char.get("spells_known", [])):
+        # add replacements until we reach original count or exhaust class list
+        originals = len(char.get("spells_known", []))
+        pool = [x for x in get_class_spell_list(cls, 1) if x not in known]
+        while len(known) < min(originals, len(get_class_spell_list(cls, 1))) and pool:
+            known.append(pool.pop(0))
+    char["spells_known"] = known
+
+    # Normalize prepared (subset of known); if empty or illegal, rebuild up to limit
+    prepared = [s for s in char.get("spells_prepared", []) if s in known]
+    limit = 2
+    if cls == "Wizard":
+        limit = max(1, int(char.get("int_mod", 0)) + 1)
+    elif cls == "Cleric":
+        limit = max(1, int(char.get("wis_mod", 0)) + 1)
+    if len(prepared) == 0:
+        prepared = known[:limit]
+    else:
+        prepared = prepared[:limit]
+    char["spells_prepared"] = prepared
+
+    # Ensure slots present
+    slots = char.setdefault("spell_slots", {})
+    if "1" not in slots:
+        max_slots = CLASS_SLOT_RULES.get(cls, {}).get("1", 0)
+        slots["1"] = {"max": max_slots, "current": max_slots}
+    else:
+        # clamp current to [0, max]
+        s = slots["1"]
+        s["max"] = CLASS_SLOT_RULES.get(cls, {}).get("1", s.get("max", 0))
+        s["current"] = max(0, min(s.get("current", s["max"]), s["max"]))
+
+def cast_spell(char: dict, spell_name: str) -> bool:
+    """Consume a level-1 slot if available and the spell is prepared; return True if cast."""
+    if spell_name not in char.get("spells_prepared", []):
+        return False
+    slots = char.get("spell_slots", {}).get("1")
+    if not slots or slots["current"] <= 0:
+        return False
+    slots["current"] -= 1
+    return True
+
+def short_spellline(char: dict) -> str:
+    """Compact readout for UI: slots and prepared list."""
+    slots = char.get("spell_slots", {}).get("1", {"current":0,"max":0})
+    prepped = ", ".join(char.get("spells_prepared", [])) or "—"
+    return f"Slots (Lv1): {slots['current']}/{slots['max']} | Prepared: {prepped}"
 
 # --- Model helpers & prompts ---
 
@@ -510,7 +589,8 @@ Follow SRD-aligned rules (D&D 5e SRD-style, CC-BY-4.0) while keeping narration v
 - Use STR for melee attack checks unless a weapon has the *finesse* property; use DEX for ranged.
 - Respect equipment stats and properties provided in the context. Two-handed weapons occupy both arms; no shield simultaneously.
 - Armor Class uses SRD-like formulas (light: base + Dex; medium: base + Dex up to +2; heavy: fixed; shield +2).
-- After a skill/attack resolution, include a mechanical line like:
+- Spells must be class-appropriate. Wizards cast from Wizard lists; Clerics from Cleric lists. Spell slots are limited and must be consumed when casting.
+- After a skill/attack/spell resolution, include a mechanical line like:
   "(Target AC {{dc}} vs Roll {{roll}} + Mod {{mod}} = {{total}}. {{'Success' if total >= dc else 'Failure'}})"
 Tone: immersive, tense, dramatic. Output pure narrative unless asked to produce JSON for checks.
 """
@@ -561,6 +641,10 @@ def apply_race_modifiers(char_data: dict, race: str):
     for k, delta in mods.items():
         char_data[k] = char_data.get(k, 0) + delta
 
+def initialize_or_validate_spells(char: dict):
+    initialize_spellcasting(char)
+    validate_spells_for_class(char)
+
 def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
     if not player_name or player_name in st.session_state["characters"]:
         st.error("Please enter a unique name for the new character.")
@@ -596,13 +680,17 @@ def create_new_character_handler(setting, genre, race, player_name, selected_cla
             char_data['name'] = player_name
             char_data['race'] = race
 
+            # Ensure numeric mods exist
             for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
                 char_data.setdefault(k, 0)
             apply_race_modifiers(char_data, race)
 
             ensure_equipped_slots(char_data)
             auto_equip_defaults(char_data)
-            normalize_all_equipped(char_data)  # normalize freshly created
+            normalize_all_equipped(char_data)
+
+            # Spellcasting init & cleanup (e.g., remove Wizard-inappropriate spells like Cure Wounds)
+            initialize_or_validate_spells(char_data)
 
             st.session_state["final_system_instruction"] = final_system_instruction
             st.session_state["characters"][player_name] = char_data
@@ -635,6 +723,7 @@ def start_adventure(setting, genre):
         return
     for _n, _c in st.session_state["characters"].items():
         ensure_equipped_slots(_c); auto_equip_defaults(_c); normalize_all_equipped(_c)
+        initialize_or_validate_spells(_c)
     intro_prompt = f"""
     Start a dramatic 3–4 paragraph introduction for {setting} / {genre}.
     Name the starting location; set vivid scene; present a clear inciting situation;
@@ -697,7 +786,8 @@ if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
     st.session_state["custom_setting_description"] = d.get("custom_setting_description", "")
     for k, v in st.session_state["characters"].items():
         ensure_equipped_slots(v)
-        normalize_all_equipped(v)  # normalize legacy loaded saves
+        normalize_all_equipped(v)
+        initialize_or_validate_spells(v)
     st.session_state["page"] = "GAME"
     st.session_state["__LOAD_FLAG__"] = False
     del st.session_state["__LOAD_DATA__"]
@@ -816,7 +906,9 @@ elif st.session_state["page"] == "GAME":
                 st.markdown("---")
                 if active_char:
                     ensure_equipped_slots(active_char)
-                    normalize_all_equipped(active_char)  # normalize before rendering
+                    normalize_all_equipped(active_char)
+                    initialize_or_validate_spells(active_char)
+
                     ac_val, ac_src = compute_ac(active_char)
                     st.markdown(f"**Name:** {active_char.get('name','')}")
                     st.markdown(f"**Race:** {active_char.get('race','')}")
@@ -825,7 +917,7 @@ elif st.session_state["page"] == "GAME":
                     st.markdown(f"**AC:** {ac_val}  \n<small>({ac_src})</small>", unsafe_allow_html=True)
                     st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
 
-                    # Inventory with equip buttons (auto stats; equipping consumes a turn)
+                    # Inventory with equip buttons
                     st.markdown("**Inventory:**")
                     if active_char.get("inventory"):
                         for idx, item in enumerate(active_char["inventory"]):
@@ -837,7 +929,6 @@ elif st.session_state["page"] == "GAME":
                                                            key=f"slot_select_{active_char['name']}_{idx}")
                             with c2:
                                 slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot_choice]
-                                # Already equipped?
                                 occupied = None
                                 for s in SLOTS:
                                     eqs = active_char["equipped"].get(s)
@@ -859,7 +950,7 @@ elif st.session_state["page"] == "GAME":
                     else:
                         st.caption("— (empty)")
 
-                    # Equipped with auto-derived summaries (read-only) with safe fallback
+                    # Equipped with auto summaries
                     st.markdown("**Equipped (by slot):**")
                     for s in SLOTS:
                         eq = active_char["equipped"].get(s)
@@ -880,6 +971,63 @@ elif st.session_state["page"] == "GAME":
                     with c4: st.markdown(f"**INT**: {active_char.get('int_mod', 0)}")
                     with c5: st.markdown(f"**WIS**: {active_char.get('wis_mod', 0)}")
                     with c6: st.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
+
+                    # ---------- SPELLS UI ----------
+                    cls = (active_char.get("race_class") or "").strip().title()
+                    class_spell_list = get_class_spell_list(cls, 1)
+                    if class_spell_list:
+                        st.markdown("---")
+                        st.subheader("Spells (Level 1)")
+                        slots = active_char["spell_slots"]["1"]
+                        st.markdown(f"**Slots:** {slots['current']}/{slots['max']}  \n**Prepared:** {', '.join(active_char['spells_prepared']) or '—'}")
+
+                        # Manage known spells (bounded to class list)
+                        with st.expander("Manage Known & Prepared", expanded=False):
+                            new_known = st.multiselect(
+                                "Known Spells",
+                                options=class_spell_list,
+                                default=[s for s in active_char["spells_known"] if s in class_spell_list],
+                                help="Choose spells your class can learn. Non-class spells are not available.",
+                                key=f"known_{active_char['name']}"
+                            )
+                            # Prepared limit
+                            limit = 2
+                            if cls == "Wizard":
+                                limit = max(1, int(active_char.get("int_mod", 0)) + 1)
+                            elif cls == "Cleric":
+                                limit = max(1, int(active_char.get("wis_mod", 0)) + 1)
+
+                            new_prepped = st.multiselect(
+                                f"Prepared Spells (max {limit})",
+                                options=new_known,
+                                default=[s for s in active_char["spells_prepared"] if s in new_known][:limit],
+                                key=f"prep_{active_char['name']}"
+                            )
+                            # Save button
+                            if st.button("Save Spells", key=f"save_spells_{active_char['name']}"):
+                                active_char["spells_known"] = new_known
+                                active_char["spells_prepared"] = new_prepped[:limit]
+                                validate_spells_for_class(active_char)
+                                st.success("Spells updated.")
+
+                        # Casting UI
+                        cA, cB = st.columns([3,1])
+                        with cA:
+                            cast_choice = st.selectbox(
+                                "Cast a prepared spell",
+                                options=["—"] + active_char["spells_prepared"],
+                                key=f"cast_sel_{active_char['name']}"
+                            )
+                        with cB:
+                            if st.button("Cast", key=f"cast_btn_{active_char['name']}"):
+                                if cast_choice and cast_choice != "—":
+                                    if cast_spell(active_char, cast_choice):
+                                        consume_action_and_narrate(
+                                            f"({active_char['name']}) casts {cast_choice}. Expend one level-1 spell slot."
+                                        )
+                                    else:
+                                        st.error("Cannot cast: not prepared or no slots remaining.")
+
             else:
                 st.info("No characters created yet.")
 
@@ -920,6 +1068,7 @@ elif st.session_state["page"] == "GAME":
             active_char = st.session_state["characters"].get(current_player_name)
             ensure_equipped_slots(active_char)
             normalize_all_equipped(active_char)
+            initialize_or_validate_spells(active_char)
 
             if prompt and prompt.strip():
                 st.session_state["history"].append({"role":"user","content":f"({current_player_name}'s Turn): {prompt}"})
@@ -934,6 +1083,7 @@ elif st.session_state["page"] == "GAME":
                 # Summaries for the model
                 eq_summary = {SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)}
                 ac_val, _ = compute_ac(active_char)
+                caster_line = short_spellline(active_char)
 
                 # Logic call only if there was a roll
                 if raw_roll is not None:
@@ -941,12 +1091,13 @@ elif st.session_state["page"] == "GAME":
                     RESOLVE A PLAYER ACTION (SRD-style):
                     Character JSON: {json.dumps(active_char)}
                     Equipped (by slot): {json.dumps(eq_summary)}
-                    Derived: Armor Class = {ac_val}
+                    Derived: Armor Class = {ac_val}; Caster: {caster_line}
                     Player Action: "{prompt}"
                     Rules:
                     - Use STR for melee unless weapon has finesse; DEX for ranged; apply properties when relevant.
-                    - Respect two-handed: if weapon has "two-handed", assume both arms are occupied and no shield benefits.
+                    - Respect two-handed: if weapon has "two-handed", both arms are occupied; no shield benefits.
                     - Choose a reasonable DC (10–20) and compute total = d20 roll ({raw_roll}) + the relevant ability modifier.
+                    - If the action is a spellcasting attempt, ensure the spell is class-appropriate and prepared, and consume a slot.
                     Return ONLY the SkillCheckResolution JSON.
                     """
                     try:
@@ -973,7 +1124,8 @@ elif st.session_state["page"] == "GAME":
                             follow_up = f"""
                             The player's risky action was resolved. EXACT JSON outcome: {json.dumps(skill)}.
                             1) Narrate vivid consequences consistent with SRD gear/properties and AC.
-                            2) Ask what the player does next.
+                            2) If a spell was involved, ensure it was class-appropriate and slots are respected.
+                            3) Ask what the player does next.
                             """
                             st.session_state["history"].append({"role":"assistant","content":f"//Mechanics: {json.dumps(skill)}//"})
                             st.session_state["history"].append({"role":"user","content": follow_up})
