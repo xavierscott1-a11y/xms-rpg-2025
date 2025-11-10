@@ -401,13 +401,6 @@ def consume_action_and_narrate(action_text: str):
 
 # --- Character creation / game flow ---
 
-# WRAPPER FOR START ADVENTURE BUTTON (Corrected function call)
-def start_adventure_handler():
-    """Wrapper to call start_adventure with current settings."""
-    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
-
-
-# WRAPPER FOR ADD CHARACTER BUTTON
 def create_character_wrapper():
     """Wrapper to call the character creation function with all current state values."""
     create_new_character_handler(
@@ -419,6 +412,7 @@ def create_character_wrapper():
         st.session_state["custom_character_description"],
         st.session_state["setup_difficulty"]
     )
+
 
 def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
     """Function to call the API and create a character JSON."""
@@ -495,6 +489,11 @@ def extract_roll(text):
     if match and 1 <= int(match.group(2)) <= 20:
         return int(match.group(2))
     return None
+
+def start_adventure_handler():
+    """Wrapper to call start_adventure with current settings."""
+    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
+
 
 def start_adventure(setting, genre):
     """Function to generate the initial narrative hook."""
