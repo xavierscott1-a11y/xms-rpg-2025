@@ -56,8 +56,11 @@ You are the ultimate Dungeon Master (DM) and Storyteller, running a persistent T
 IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
 Setting Details: {custom_setting_description}
 ---
+Game Rules:
+1. **Free Actions:** Simple actions like looking around, dropping an item, or shouting a brief warning are **Free Actions** and do not end the player's turn or require a check. Only complex, risky, or time-consuming actions require a skill check.
+2. **Combat/Skill Check Display:** After resolving a skill check, you MUST narrate the outcome vividly. The narration should follow a mechanical summary showing the DC vs. the result. Example: "You swing your sword. (Monster AC 12 vs Roll 12 + Mod 4 = 16. Success)"
+---
 Your tone must match the genre: be immersive, tense, and dramatic.
-When a skill check outcome (JSON) is provided to you, you must vividly integrate that exact result into the next narrative scene.
 Your output must be pure, flowing narrative text. DO NOT include JSON unless specifically asked to perform a check.
 """
 
@@ -171,9 +174,8 @@ def create_new_character_handler(setting, genre, player_name, selected_class, cu
             st.session_state["history"].append({"role": "assistant", "content": "Failed to create character due to API error. Please try again."})
 
     # --- FINAL CLEANUP AND RERUN ---
-    # Clear the input helpers after successful/failed attempt
-    st.session_state["new_player_name_input_setup_value"] = ""
-    st.session_state["custom_character_description"] = ""
+    st.session_state["new_player_name_input_setup_value"] = "" # Clear input helper
+    st.session_state["custom_character_description"] = "" # Clear description
     st.rerun() 
 
 
@@ -419,6 +421,7 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the three columns ---
+    # NOTE: The visual height of the containers is what makes the UI scrollable and separated.
     col_settings, col_chat, col_stats = st.columns([2, 5, 3])
 
     game_started = st.session_state["adventure_started"]
@@ -427,7 +430,6 @@ elif st.session_state["page"] == "GAME":
     # LEFT COLUMN (Settings & Controls)
     # =========================================================================
     with col_settings:
-        # Applying visual separation using a border
         with st.container(border=True):
             st.header("Game Details")
             st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
