@@ -186,7 +186,6 @@ def extract_roll(text):
         return int(match.group(2))
     return None
 
-# NEW HANDLER FUNCTION
 def start_adventure_handler():
     """Wrapper to call start_adventure with current settings."""
     start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
@@ -428,13 +427,13 @@ if st.session_state["page"] == "SETUP":
 elif st.session_state["page"] == "GAME":
     
     # --- Define the two main columns (Center Chat + Right Stats) ---
-    # The native sidebar handles the controls and is fixed/scrollable.
+    # Col_chat will fill the screen space, Col_stats will be rendered as the right sidebar
     col_chat, col_stats = st.columns([5, 3]) 
     
     game_started = st.session_state["adventure_started"]
 
     # ---------------------------------------------------------------------
-    # NATIVE STREAMLIT SIDEBAR (For Settings and persistent visibility)
+    # NATIVE STREAMLIT SIDEBAR (For Controls - FIXED/SCROLLABLE)
     # ---------------------------------------------------------------------
     with st.sidebar:
         st.header("Game Details")
@@ -457,7 +456,7 @@ elif st.session_state["page"] == "GAME":
     # ---------------------------------------------------------------------
 
     # =========================================================================
-    # RIGHT COLUMN (Active Player Stats - FIXED VISUAL)
+    # RIGHT COLUMN (Active Player Stats - RENDERED IN MAIN BODY)
     # =========================================================================
     with col_stats:
         with st.container(border=True):
