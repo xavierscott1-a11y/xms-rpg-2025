@@ -402,26 +402,7 @@ elif st.session_state["page"] == "GAME":
 
     # ---------------------- SIDEBAR CONTROLS ----------------------
     with st.sidebar:
-        st.header("Game Controls")
-        with st.expander("World & Difficulty", expanded=False):
-            st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
-            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
-            st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
-        
-        st.markdown("---")
-        st.subheader("Save/Load")
-        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
-            pass 
-        if st.session_state["saved_game_json"]:
-            st.download_button(
-                label="Download Game File",
-                data=st.session_state["saved_game_json"],
-                file_name="gemini_rpg_save.json",
-                mime="application/json",
-            )
-
-        # ---- Active Player Stats moved here as a collapsible bar ----
-        st.markdown("---")
+        # ---- Active Player Stats at the very top ----
         with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
                 player_options = list(st.session_state["characters"].keys())
@@ -453,6 +434,25 @@ elif st.session_state["page"] == "GAME":
                     st.markdown("**Inventory:** " + ", ".join(active_char['inventory']))
             else:
                 st.info("No characters created yet.")
+
+        # ---- Game Controls and other panels below ----
+        st.header("Game Controls")
+        with st.expander("World & Difficulty", expanded=False):
+            st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
+            st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
+        
+        st.markdown("---")
+        st.subheader("Save/Load")
+        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
+            pass 
+        if st.session_state["saved_game_json"]:
+            st.download_button(
+                label="Download Game File",
+                data=st.session_state["saved_game_json"],
+                file_name="gemini_rpg_save.json",
+                mime="application/json",
+            )
 
     # ---------------------- MAIN CHAT AREA ----------------------
     with col_chat:
