@@ -1,977 +1,1183 @@
 import streamlit as st
 st.set_page_config(layout="wide")
 
-import json, re, string, random, math
+import json
+import re
+import string
+from google import genai
+from google.genai.types import Content, Part, GenerateContentConfig
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Tuple
-import streamlit.components.v1 as components
-from datetime import datetime
+import streamlit.components.v1 as components  # NEW: for scroll-to-top
 
-# =================== CONFIG: AI storyteller ON by default ===================
-USE_AI_NARRATION_DEFAULT = True  # <— changed to True
-
-# Try to load Google Gemini client (optional, but recommended)
-try:
-    from google import genai
-    from google.genai.types import GenerateContentConfig
-    GEMINI_AVAILABLE = True
-except Exception:
-    GEMINI_AVAILABLE = False
-
-# =================== Styles ===================
+# ---- Style: widen sidebar and tidy spacing ----
 st.markdown("""
 <style>
-[data-testid="stSidebar"] { width: 540px; min-width: 540px; }
-@media (max-width: 1200px) { [data-testid="stSidebar"] { width: 460px; min-width: 460px; } }
+[data-testid="stSidebar"] { width: 520px; min-width: 520px; } /* wider sidebar */
+@media (max-width: 1200px) { [data-testid="stSidebar"] { width: 440px; min-width: 440px; } }
 section[aria-label="Active Player"] div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 div.continue-bar { margin-top: 0.5rem; }
 small.srd-note { opacity: 0.75; display:block; margin-top:1rem; }
-hr.slim { border:none; border-top:1px solid #444; margin:6px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# =================== Scroll to top helper ===================
-def _scroll_to_top():
-    components.html("""
-        <script>window.parent.scrollTo({ top: 0, behavior: 'smooth' });</script>
-    """, height=0)
+# --- Configuration (API Client Setup) ---
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    st.error("API Key not found. Please ensure 'GEMINI_API_KEY' is set in Streamlit Secrets.")
+    st.stop()
 
-# =================== AI Client and Narration ===================
-client = None
-if GEMINI_AVAILABLE:
-    try:
-        GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-        if GEMINI_API_KEY:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception:
-        client = None
+try:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+except Exception as e:
+    st.error(f"Error initializing Gemini Client: {e}")
+    st.stop()
 
-SYSTEM_INSTRUCTION = """You are an expert Game Master and evocative fantasy narrator.
-Write 3–6 vivid paragraphs per turn. Keep the story coherent and cinematic.
-Follow these rules:
-- Respect the mechanics summary and never contradict it.
-- Keep proper nouns and details consistent.
-- End with a clear, in-world prompt asking what the party does next.
-- Avoid game rules jargon unless summarizing rolls/outcomes provided by the mechanics section.
-- No bullet lists; use flowing narrative.
-"""
+# --- Game Data and Settings ---
 
-def offline_narrator_opening(state:Dict)->str:
-    setting = state.get("setup_setting","Classic Fantasy")
-    genre = state.get("setup_genre","High Magic Quest")
-    details = state.get("custom_setting_description","")
-    party = ", ".join(state["characters"].keys()) or "a small, uncertain band"
-    return (
-        f"The wind tastes of rain and iron as {party} arrives at the edge of a new tale. "
-        f"This is a {setting.lower()} world colored by {genre.lower()}. "
-        f"{('You’ve heard whispers: ' + details) if details else 'Rumors flicker like candlelight—danger, treasure, and a secret history lost to polite maps.'} "
-        "Lanterns sway over a narrow lane; shutters blink like half-asleep eyes. Somewhere beyond, a bell tolls once—and then refuses to ring again.\n\n"
-        "A figure steps into view, coat slick with mist, voice low with urgency. \"If you’ve any courage, keep walking. The city pretends to be calm—but it’s a stage set over an empty well. And tonight, something climbs.\" "
-        "A distant scream skates down the alley stones. The smell of old smoke tickles your throat.\n\n"
-        "What do you do?"
-    )
+SETTINGS_OPTIONS = {
+    "Classic Fantasy": ["High Magic Quest", "Gritty Dungeon Crawl", "Political Intrigue"],
+    "Post-Apocalypse": ["Mutant Survival", "Cybernetic Wasteland", "Resource Scarcity"],
+    "Cyberpunk": ["Corporate Espionage", "Street Gang Warfare", "AI Revolution"],
+    "Modern Fantasy": ["Urban Occult Detective", "Hidden Magic Conspiracy", "Campus Supernatural Drama"],
+    "Horror": ["Cosmic Dread (Lovecraftian)", "Slasher Survival", "Gothic Vampire Intrigue"],
+    "Spycraft": ["Cold War Espionage", "High-Tech Corporate Infiltration", "Shadowy Global Syndicate"],
+}
 
-def offline_narrator_followup(state:Dict, action_text:str)->str:
-    actor = state.get("current_player","A companion")
-    return (
-        f"{actor} moves with intent. Boots scuff, torchlight trembles, and the night leans closer as if eavesdropping. "
-        "Shadows break around brick and lamplight, hinting at motion in the periphery—something watchful, almost curious.\n\n"
-        "A door unlatches—a whisper, a breath—and the alley exhales a second scent: damp stone and old wool. "
-        "From an upstairs window, eyes vanish behind a curtain. A sign creaks on tired hinges. "
-        "Somewhere nearby, metal kisses metal.\n\n"
-        "What do you do next?"
-    )
+CLASS_OPTIONS = {
+    "Classic Fantasy": ["Fighter", "Wizard", "Rogue", "Cleric", "Barbarian", "Random"],
+    "Post-Apocalypse": ["Scavenger", "Mutant", "Tech Specialist", "Warlord", "Drifter", "Random"],
+    "Cyberpunk": ["Street Samurai", "Netrunner", "Corpo", "Techie", "Gang Enforcer", "Random"],
+    "Modern Fantasy": ["Occult Investigator", "Urban Shaman", "Witch", "Goth Musician", "Bouncer", "Random"],
+    "Horror": ["Skeptical Detective", "Paranoid Survivor", "Occultist", "Tough Veteran", "Innocent Victim", "Random"],
+    "Spycraft": ["Human"],  # grounded non-caster
+}
 
-def _party_sheet_summary(state:Dict)->str:
-    lines = []
-    for name,ch in state["characters"].items():
-        ac, ac_src = ac_calc(ch)
-        eq_summary=[]
-        for s in SLOTS:
-            e=ch["equipped"].get(s)
-            if e:
-                eq_summary.append(f"{SLOT_LABEL[s]}: {e['item']}")
-        mods = f"STR {ch['str_mod']} DEX {ch['dex_mod']} CON {ch['con_mod']} INT {ch['int_mod']} WIS {ch['wis_mod']} CHA {ch['cha_mod']}"
-        lines.append(f"- {name} ({ch['race']} {ch['race_class']} L{level_for_xp(ch.get('experience',0))}) "
-                     f"HP {ch['current_hp']}/{ch.get('max_hp',20)} | AC {ac} | {mods} | Equipped: {', '.join(eq_summary) or '—'}")
-    return "\n".join(lines)
+DIFFICULTY_OPTIONS = {
+    "Easy (Narrative Focus)": "DC scaling is generous (max DC 15). Combat is forgiving. Puzzles are simple.",
+    "Normal (Balanced)": "Standard DC scaling (max DC 20). Balanced lethality. Moderate puzzles.",
+    "Hard (Lethal)": "DC scaling is brutal (max DC 25+). Critical failures are common. High chance of character death.",
+}
 
-def _encounter_summary(enc:Optional[Dict])->str:
-    if not enc or not enc.get("active"):
-        return "No active combat. The scene is in exploration mode."
-    order = " → ".join([f"{n}({i})" for n,i in enc.get("initiative",[])]) or "initiative not rolled"
-    mobs = []
-    for c in enc["combatants"]:
-        status = "DEAD" if c.get("dead") else (f"{c['current_hp']}/{c['max_hp']} HP")
-        side = "PC" if c["is_player"] else "NPC"
-        mobs.append(f"- {c['name']} [{side}] AC {c['ac']} | {status}")
-    return f"Round {enc['round']}, Turn index {enc['turn_index']}. Initiative: {order}\n" + "\n".join(mobs)
+# --- Races per setting + stat modifiers ---
+RACE_OPTIONS = {
+    "Classic Fantasy": ["Human", "Elf", "Dwarf", "Halfling", "Orc", "Tiefling"],
+    "Post-Apocalypse": ["Human", "Mutant", "Android", "Cyborg", "Beastkin", "Ghoul"],
+    "Cyberpunk": ["Human", "Cyborg", "Augmented", "Synth", "Clone"],
+    "Modern Fantasy": ["Human", "Fae-touched", "Vampire", "Werewolf", "Mageborn"],
+    "Horror": ["Human", "Occultist", "Touched", "Fragmented"],
+    "Spycraft": ["Human"],
+}
 
-def compose_story_prompt(state:Dict, player_utterance:str="")->str:
-    """Builds a rich narration prompt for the AI, mixing world + mechanics + last actions."""
-    setting = state.get("setup_setting","Classic Fantasy")
-    genre   = state.get("setup_genre","High Magic Quest")
-    details = state.get("custom_setting_description","(no extra world details)")
-    party   = _party_sheet_summary(state)
-    enc     = _encounter_summary(state.get("encounter"))
-    # Take last few mechanics/system lines (assistant role entries that include rolls or outcomes)
-    recent = []
-    for msg in state["history"][-12:]:
-        if msg["role"]=="assistant":
-            recent.append(msg["content"])
-    mech = "\n".join(recent[-6:]) or "(No recent mechanics; continue scene.)"
+RACE_MODIFIERS = {
+    "Human":       {"str_mod": 0, "dex_mod": 0, "con_mod": 0, "int_mod": 0, "wis_mod": 0, "cha_mod": 0},
+    "Elf":         {"dex_mod": 1, "int_mod": 1, "con_mod": -1},
+    "Dwarf":       {"con_mod": 2, "cha_mod": -1},
+    "Halfling":    {"dex_mod": 1, "str_mod": -1},
+    "Orc":         {"str_mod": 2, "int_mod": -1, "cha_mod": -1},
+    "Tiefling":    {"cha_mod": 1, "int_mod": 1, "wis_mod": -1},
 
-    return f"""You are the GM/narrator.
+    "Mutant":      {"con_mod": 1, "str_mod": 1, "cha_mod": -1},
+    "Android":     {"int_mod": 2, "wis_mod": -1},
+    "Cyborg":      {"str_mod": 1, "con_mod": 1, "dex_mod": -1},
+    "Beastkin":    {"dex_mod": 1, "wis_mod": 1, "int_mod": -1},
+    "Ghoul":       {"con_mod": 1, "cha_mod": -2},
 
-=== WORLD ===
-Setting: {setting}
-Genre: {genre}
-World details: {details}
+    "Augmented":   {"dex_mod": 1, "int_mod": 1, "wis_mod": -1},
+    "Synth":       {"int_mod": 2, "cha_mod": -1},
+    "Clone":       {"wis_mod": 1, "cha_mod": -1},
 
-=== PARTY SHEET ===
-{party}
+    "Fae-touched": {"cha_mod": 1, "wis_mod": 1, "con_mod": -1},
+    "Vampire":     {"cha_mod": 1, "str_mod": 1, "con_mod": -1},
+    "Werewolf":    {"str_mod": 2, "int_mod": -1},
+    "Mageborn":    {"int_mod": 2, "str_mod": -1},
 
-=== ENCOUNTER STATE ===
-{enc}
+    "Occultist":   {"int_mod": 1, "wis_mod": 1, "con_mod": -1},
+    "Touched":     {"wis_mod": 2, "cha_mod": -1},
+    "Fragmented":  {"int_mod": 1, "cha_mod": -1},
+}
 
-=== RECENT MECHANICS ===
-{mech}
-
-=== PLAYER ACTION (latest) ===
-{player_utterance or "(Continue the scene; no specific action provided)."}
-
-=== TASK ===
-Write 3–6 paragraphs of vivid, cinematic narrative that naturally continues the scene. 
-Weave in consequences of the latest mechanics and action. Maintain continuity. 
-End with a clear, in-world prompt asking what the party does next."""
-
-def ai_narrate_block(state:Dict, player_utterance:str="")->str:
-    """Primary narration path; falls back to offline narrator if API not configured."""
-    if client and st.session_state.get("use_ai_narration", False):
-        try:
-            cfg = GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
-            prompt = compose_story_prompt(state, player_utterance)
-            resp = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[{"role":"user","parts":[{"text":prompt}]}],
-                config=cfg
-            )
-            text = getattr(resp, "text", "") or ""
-            return text
-        except Exception as e:
-            return f"(Narration error; falling back) {offline_narrator_followup(state, player_utterance)}"
-    # Fallback if AI disabled or no key
-    return offline_narrator_followup(state, player_utterance)
-
-# =================== Core SRD-ish Rules (same as before) ===================
-LEVEL_TABLE = [
-    (1, 0,   2),
-    (2, 300, 2),
-    (3, 900, 2),
-    (4, 2700,2),
-    (5, 6500,3),
-]
-
-CASTING_MOD = {"Wizard":"int_mod","Cleric":"wis_mod"}
-MARTIAL_CLASSES = {"Fighter","Barbarian","Rogue","Paladin","Ranger"}
-SIMPLE_WEAPON_PROF = {"Wizard","Cleric","Rogue","Barbarian","Fighter","Paladin","Ranger"}
-MARTIAL_WEAPON_PROF = {"Fighter","Barbarian","Paladin","Ranger"}
-
-CASTER_KEYWORDS = {"wizard":"Wizard","cleric":"Cleric"}
-def canonical_class(name: Optional[str]) -> str:
-    s = (name or "").lower()
-    for k,v in CASTER_KEYWORDS.items():
-        if k in s: return v
-    return (name or "").strip().title()
-
+# --- SRD equipment database (Lite) for Classic Fantasy ---
 SRD_ITEMS = {
-    "dagger":{"type":"weapon","hands":1,"damage":"1d4","properties":["finesse","light","thrown"],"simple":True},
-    "shortsword":{"type":"weapon","hands":1,"damage":"1d6","properties":["finesse","light"],"simple":False},
-    "longsword":{"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"],"simple":False},
-    "rapier":{"type":"weapon","hands":1,"damage":"1d8","properties":["finesse"],"simple":False},
-    "battleaxe":{"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"],"simple":False},
-    "warhammer":{"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"],"simple":False},
-    "greataxe":{"type":"weapon","hands":2,"damage":"1d12","properties":["heavy","two-handed"],"simple":False},
-    "greatsword":{"type":"weapon","hands":2,"damage":"2d6","properties":["heavy","two-handed"],"simple":False},
-    "shortbow":{"type":"weapon","hands":2,"damage":"1d6","properties":["two-handed","ammunition","range"],"ranged":True,"simple":True},
-    "longbow":{"type":"weapon","hands":2,"damage":"1d8","properties":["heavy","two-handed","ammunition","range"],"ranged":True,"simple":False},
-    "shield":{"type":"shield","hands":1,"ac_bonus":2,"properties":["worn in one arm"]},
-    "leather armor":{"type":"armor","hands":0,"armor":{"category":"light","base":11,"dex_cap":None}},
-    "studded leather":{"type":"armor","hands":0,"armor":{"category":"light","base":12,"dex_cap":None}},
-    "chain shirt":{"type":"armor","hands":0,"armor":{"category":"medium","base":13,"dex_cap":2}},
-    "scale mail":{"type":"armor","hands":0,"armor":{"category":"medium","base":14,"dex_cap":2}},
-    "half plate":{"type":"armor","hands":0,"armor":{"category":"medium","base":15,"dex_cap":2}},
-    "chain mail":{"type":"armor","hands":0,"armor":{"category":"heavy","base":16,"dex_cap":0}},
-    "splint":{"type":"armor","hands":0,"armor":{"category":"heavy","base":17,"dex_cap":0}},
-    "plate":{"type":"armor","hands":0,"armor":{"category":"heavy","base":18,"dex_cap":0}},
-    "boots":{"type":"gear","hands":0,"properties":["footwear"]},
-    "ring":{"type":"gear","hands":0,"properties":["jewelry"]},
-    "amulet":{"type":"gear","hands":0,"properties":["neckwear"]},
-    "helm":{"type":"gear","hands":0,"properties":["headwear"]},
+    # Weapons
+    "dagger":        {"type":"weapon","hands":1,"damage":"1d4","properties":["finesse","light","thrown"]},
+    "shortsword":    {"type":"weapon","hands":1,"damage":"1d6","properties":["finesse","light"]},
+    "longsword":     {"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"]},
+    "rapier":        {"type":"weapon","hands":1,"damage":"1d8","properties":["finesse"]},
+    "battleaxe":     {"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"]},
+    "warhammer":     {"type":"weapon","hands":1,"damage":"1d8","properties":["versatile 1d10"]},
+    "greataxe":      {"type":"weapon","hands":2,"damage":"1d12","properties":["heavy","two-handed"]},
+    "greatsword":    {"type":"weapon","hands":2,"damage":"2d6","properties":["heavy","two-handed"]},
+    "shortbow":      {"type":"weapon","hands":2,"damage":"1d6","properties":["two-handed","ammunition","range"]},
+    "longbow":       {"type":"weapon","hands":2,"damage":"1d8","properties":["heavy","two-handed","ammunition","range"]},
+    # Shields
+    "shield":        {"type":"shield","hands":1,"ac_bonus":2,"properties":["worn in one arm"]},
+    # Armor
+    "leather armor":   {"type":"armor","hands":0,"armor":{"category":"light","base":11,"dex_cap":None}},
+    "studded leather": {"type":"armor","hands":0,"armor":{"category":"light","base":12,"dex_cap":None}},
+    "chain shirt":     {"type":"armor","hands":0,"armor":{"category":"medium","base":13,"dex_cap":2}},
+    "scale mail":      {"type":"armor","hands":0,"armor":{"category":"medium","base":14,"dex_cap":2}},
+    "half plate":      {"type":"armor","hands":0,"armor":{"category":"medium","base":15,"dex_cap":2}},
+    "chain mail":      {"type":"armor","hands":0,"armor":{"category":"heavy","base":16,"dex_cap":0}},
+    "splint":          {"type":"armor","hands":0,"armor":{"category":"heavy","base":17,"dex_cap":0}},
+    "plate":           {"type":"armor","hands":0,"armor":{"category":"heavy","base":18,"dex_cap":0}},
+    # Flavor gear
+    "boots":           {"type":"gear","hands":0,"properties":["footwear"]},
+    "cloak":           {"type":"gear","hands":0,"properties":["clothing"]},
+    "ring":            {"type":"gear","hands":0,"properties":["jewelry"]},
+    "amulet":          {"type":"gear","hands":0,"properties":["neckwear"]},
+    "helm":            {"type":"gear","hands":0,"properties":["headwear"]},
 }
-ALIASES = {
-    "leather":"leather armor","leather armour":"leather armor",
-    "studded leather armor":"studded leather","studded armour":"studded leather",
-    "chainmail":"chain mail","chain mail armor":"chain mail","chainmail armor":"chain mail",
-    "mail":"chain mail","half-plate":"half plate","breastplate":"scale mail",
-    "long sword":"longsword","short sword":"shortsword","battle axe":"battleaxe","war hammer":"warhammer",
-    "great sword":"greatsword","great axe":"greataxe","buckler":"shield","helmet":"helm",
-    "chain shirt armor":"chain shirt"
+
+# ---- Canonicalization: aliases + fuzzy matching to SRD keys ----
+
+SRD_ALIASES = {
+    # Armor variants / common spellings
+    "leather": "leather armor",
+    "leather armour": "leather armor",
+    "studded leather armor": "studded leather",
+    "studded armour": "studded leather",
+    "chainmail": "chain mail",
+    "chain mail armor": "chain mail",
+    "chainmail armor": "chain mail",
+    "mail": "chain mail",
+    "half-plate": "half plate",
+    "breastplate": "scale mail",  # stand-in in our lite list
+    # Weapons spacing/synonyms
+    "long sword": "longsword",
+    "short sword": "shortsword",
+    "battle axe": "battleaxe",
+    "war hammer": "warhammer",
+    "great sword": "greatsword",
+    "great axe": "greataxe",
+    # Shields & misc
+    "buckler": "shield",
+    "helmet": "helm",
+    "chain shirt armor": "chain shirt",
 }
-DROP_WORDS = set("well-made fine sturdy rusty old new decorated engraved masterwork +1 +2 +3 +4 +5 armor armour of the".split())
 
-def _tok(s:str)->List[str]:
-    s=(s or "").lower()
-    s=s.translate(str.maketrans("","",string.punctuation))
-    return [w for w in s.split() if w and w not in DROP_WORDS]
+CLEAN_WORDS_TO_DROP = set([
+    "well-made","fine","sturdy","rusty","old","new","decorated","engraved",
+    "masterwork","+1","+2","+3","+4","+5","armor","armour","of","the"
+])
 
-def canonicalize_item_name(name:str)->Optional[str]:
+def _tokenize(s: str) -> List[str]:
+    s = (s or "").lower()
+    s = s.translate(str.maketrans("", "", string.punctuation))
+    return [w for w in s.split() if w and w not in CLEAN_WORDS_TO_DROP]
+
+def _canonical_alias(s: str) -> Optional[str]:
+    key = (s or "").strip().lower()
+    return SRD_ALIASES.get(key)
+
+def canonicalize_item_name(name: str) -> Optional[str]:
     if not name: return None
-    low=name.strip().lower()
+    low = name.strip().lower()
     if low in SRD_ITEMS: return low
-    if low in ALIASES and ALIASES[low] in SRD_ITEMS: return ALIASES[low]
-    tokens=_tok(low); joined=" ".join(tokens)
-    if joined in ALIASES and ALIASES[joined] in SRD_ITEMS: return ALIASES[joined]
-    if joined in SRD_ITEMS: return joined
-    name_t=set(tokens); best=None; best_len=-1
-    for k in SRD_ITEMS:
-        kt=set(_tok(k))
-        if kt and kt.issubset(name_t):
-            l=len(" ".join(kt))
-            if l>best_len: best=k; best_len=l
+    ali = _canonical_alias(low)
+    if ali in SRD_ITEMS: return ali
+    tokens = _tokenize(low)
+    cleaned = " ".join(tokens)
+    ali2 = _canonical_alias(cleaned)
+    if ali2 in SRD_ITEMS: return ali2
+    if cleaned in SRD_ITEMS: return cleaned
+    best = None
+    best_len = -1
+    name_tokens = set(tokens)
+    for key in SRD_ITEMS.keys():
+        key_tokens = set(_tokenize(key))
+        if key_tokens and key_tokens.issubset(name_tokens):
+            if len(" ".join(key_tokens)) > best_len:
+                best = key
+                best_len = len(" ".join(key_tokens))
     return best
 
-def item_stats(name:str)->Optional[Dict]:
-    c=canonicalize_item_name(name)
-    return SRD_ITEMS.get(c) if c else None
+def lookup_item_stats(name: str) -> Optional[Dict]:
+    if not name: return None
+    canon = canonicalize_item_name(name)
+    if canon and canon in SRD_ITEMS:
+        return SRD_ITEMS[canon]
+    return None
 
-SLOTS = ["right_arm","left_arm","body","feet","right_hand","left_hand","neck","head"]
-SLOT_LABEL = {"right_arm":"Right Arm","left_arm":"Left Arm","body":"Body","feet":"Feet",
-              "right_hand":"Right Hand","left_hand":"Left Hand","neck":"Neck","head":"Head"}
+def summarize_item(name: str, stats: Dict) -> str:
+    if not stats: return (name or "—")
+    label = canonicalize_item_name(name) or name
+    t = stats.get("type")
+    if t == "weapon":
+        props = ", ".join(stats.get("properties", [])) or "—"
+        hands = stats.get("hands", 1)
+        return f"{label} — {stats.get('damage')} dmg, {props}; hands: {hands}"
+    if t == "shield":
+        return f"{label} — +{stats.get('ac_bonus',0)} AC (shield)"
+    if t == "armor":
+        a = stats.get("armor", {})
+        cat = a.get("category","armor")
+        base = a.get("base")
+        cap  = a.get("dex_cap")
+        dex_text = "+ Dex" if cap is None else (f"+ Dex (max {cap})" if cap>0 else "")
+        return f"{label} — {cat} armor, AC {base}{(' ' + dex_text) if dex_text else ''}"
+    props = ", ".join(stats.get("properties", [])) or "—"
+    return f"{label} — {props}"
 
-def ensure_equipped(char:Dict):
-    char.setdefault("equipped",{})
-    for s in SLOTS: char["equipped"].setdefault(s, None)
+# --- Schemas ---
 
-def equip(char:Dict, slot:str, item:str):
-    ensure_equipped(char)
-    stats=item_stats(item) or {}
-    norm=(canonicalize_item_name(item) or item).lower()
+class CharacterSheet(BaseModel):
+    name: str
+    race_class: str
+    str_mod: int
+    dex_mod: int
+    con_mod: int
+    int_mod: int
+    wis_mod: int
+    cha_mod: int
+    current_hp: int
+    morale_sanity: int
+    inventory: List[str]
+    experience: int
+
+character_creation_config = GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=CharacterSheet,
+)
+
+class SkillCheckResolution(BaseModel):
+    action: str
+    attribute_used: str
+    difficulty_class: int
+    player_d20_roll: int
+    attribute_modifier: int
+    total_roll: int
+    outcome_result: str
+    hp_change: int = 0
+    consequence_narrative: str
+
+skill_check_config = GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=SkillCheckResolution,
+)
+
+# --- Equipment system (slots + heuristics) ---
+
+SLOTS = [
+    "right_arm",  # weapon/shield
+    "left_arm",   # weapon/shield
+    "body",       # armor/clothes
+    "feet",       # boots
+    "right_hand", # ring
+    "left_hand",  # ring
+    "neck",       # necklace
+    "head",       # helmet/diadem
+]
+SLOT_LABEL = {
+    "right_arm": "Right Arm",
+    "left_arm": "Left Arm",
+    "body": "Body",
+    "feet": "Feet",
+    "right_hand": "Right Hand",
+    "left_hand": "Left Hand",
+    "neck": "Neck",
+    "head": "Head",
+}
+
+_WEAPON_WORDS = [
+    "sword","dagger","axe","mace","spear","bow","crossbow","staff","club",
+    "blade","hammer","rapier","longsword","shortsword","katana",
+    "pistol","rifle","shotgun","smg","revolver","gun","greataxe","greatsword","longbow","shortbow"
+]
+_SHIELD_WORDS = ["shield","buckler"]
+_ARMOR_WORDS = [
+    "armor","armour","leather","studded","chain","chainmail","mail","scale","plate","half plate","splint","breastplate","brigandine","vest","robes","robe","tunic"
+]
+_BOOTS_WORDS = ["boots","shoes","greaves","sandals","sabatons"]
+_RING_WORDS = ["ring","band","signet"]
+_NECK_WORDS = ["necklace","amulet","pendant","torc"]
+_HEAD_WORDS = ["helmet","helm","diadem","crown","hat","hood","cap"]
+
+def is_match(word_list, name: str) -> bool:
+    low = (name or "").lower()
+    return any(w in low for w in word_list)
+
+def detect_candidate_slots(item_name: str) -> List[str]:
+    slots = []
+    if is_match(_SHIELD_WORDS, item_name):    slots += ["left_arm","right_arm"]
+    if is_match(_WEAPON_WORDS, item_name):    slots += ["right_arm","left_arm"]
+    if is_match(_ARMOR_WORDS, item_name):     slots += ["body"]
+    if is_match(_BOOTS_WORDS, item_name):     slots += ["feet"]
+    if is_match(_RING_WORDS, item_name):      slots += ["right_hand","left_hand"]
+    if is_match(_NECK_WORDS, item_name):      slots += ["neck"]
+    if is_match(_HEAD_WORDS, item_name):      slots += ["head"]
+    if not slots: slots = SLOTS.copy()
+    seen = set(); ordered = []
+    for s in slots:
+        if s not in seen:
+            seen.add(s); ordered.append(s)
+    return ordered
+
+def ensure_equipped_slots(char: dict):
+    if "equipped" not in char or not isinstance(char["equipped"], dict):
+        char["equipped"] = {}
     for s in SLOTS:
-        eq=char["equipped"].get(s)
-        if eq and (canonicalize_item_name(eq["item"]) or eq["item"]).lower()==norm:
-            char["equipped"][s]=None
-    entry={"item":item,"stats":stats}
-    char["equipped"][slot]=entry
-    if stats.get("type")=="weapon" and stats.get("hands",1)==2:
-        other="left_arm" if slot=="right_arm" else "right_arm"
-        char["equipped"][other]=entry
-        for s in ("left_arm","right_arm"):
-            eq=char["equipped"].get(s)
-            if eq and eq is not entry and eq.get("stats",{}).get("type")=="shield":
-                char["equipped"][s]=None
+        if char["equipped"].get(s) is not None and not isinstance(char["equipped"][s], dict):
+            char["equipped"][s] = None
+        char["equipped"].setdefault(s, None)
 
-def unequip(char:Dict, slot:str):
-    ensure_equipped(char)
-    char["equipped"][slot]=None
+def unequip_slot(char: dict, slot: str):
+    ensure_equipped_slots(char)
+    char["equipped"][slot] = None
 
-def ac_calc(char:Dict)->Tuple[int,str]:
-    ensure_equipped(char)
-    dex=int(char.get("dex_mod",0))
-    base=10; dex_add=dex; parts=[]
-    armor=char["equipped"].get("body")
-    if armor and armor.get("stats",{}).get("type")=="armor":
-        a=armor["stats"]["armor"]; base=a["base"]
-        cap=a["dex_cap"]
-        if cap is None: parts=[f"{base} (Armor)","+DEX"]; dex_add=dex
-        elif cap>0: parts=[f"{base} (Armor)",f"+DEX (max {cap})"]; dex_add=min(dex,cap)
-        else: parts=[f"{base} (Armor)"]; dex_add=0
+def equip_to_slot(char: dict, slot: str, item_name: str):
+    ensure_equipped_slots(char)
+    stats = lookup_item_stats(item_name)
+    norm = (canonicalize_item_name(item_name) or item_name).lower()
+    for s in SLOTS:
+        eqs = char["equipped"].get(s)
+        if eqs:
+            other_norm = (canonicalize_item_name(eqs.get("item","")) or eqs.get("item","")).lower()
+            if other_norm == norm:
+                char["equipped"][s] = None
+    entry = {"item": item_name, "stats": stats or {}, "summary": summarize_item(item_name, stats or {})}
+    char["equipped"][slot] = entry
+    if stats and stats.get("type")=="weapon" and stats.get("hands",1) == 2:
+        other = "left_arm" if slot=="right_arm" else "right_arm"
+        char["equipped"][other] = entry
+        for s in ["left_arm","right_arm"]:
+            e = char["equipped"].get(s)
+            if e and e.get("stats",{}).get("type")=="shield" and e is not entry:
+                char["equipped"][s] = None
+
+def auto_equip_defaults(char: dict):
+    ensure_equipped_slots(char)
+    inv = char.get("inventory", []) or []
+    def first_srd_match(candidate_keys: List[str]) -> Optional[str]:
+        for raw in inv:
+            canon = canonicalize_item_name(raw)
+            if canon in candidate_keys:
+                return raw
+        return None
+    if not char["equipped"]["body"]:
+        order = ["plate","splint","chain mail","half plate","scale mail","chain shirt","studded leather","leather armor"]
+        raw = first_srd_match(order)
+        if raw: equip_to_slot(char,"body",raw)
+    if not char["equipped"]["right_arm"]:
+        chosen = None
+        for raw in inv:
+            st_ = lookup_item_stats(raw)
+            if st_ and st_.get("type")=="weapon":
+                chosen = raw; break
+        if chosen:
+            equip_to_slot(char,"right_arm", chosen)
+    right = char["equipped"]["right_arm"]
+    right_two_handed = bool(right and right.get("stats",{}).get("type")=="weapon" and right["stats"].get("hands",1)==2)
+    if not right_two_handed and not char["equipped"]["left_arm"]:
+        sh_raw = None
+        for raw in inv:
+            st_ = lookup_item_stats(raw)
+            if st_ and st_.get("type")=="shield":
+                sh_raw = raw; break
+        if sh_raw:
+            equip_to_slot(char, "left_arm", sh_raw)
+    if not char["equipped"]["feet"]:
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if "boots" in can: equip_to_slot(char,"feet",raw); break
+    if not char["equipped"]["neck"]:
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if can in ("amulet",): equip_to_slot(char,"neck",raw); break
+            if "necklace" in can or "pendant" in can or "torc" in can:
+                equip_to_slot(char,"neck",raw); break
+    if not char["equipped"]["head"]:
+        for raw in inv:
+            can = canonicalize_item_name(raw) or ""
+            if can in ("helm",): equip_to_slot(char,"head",raw); break
+            if "helmet" in raw.lower() or "hood" in raw.lower() or "cap" in raw.lower():
+                equip_to_slot(char,"head",raw); break
+    if not char["equipped"]["right_hand"]:
+        for raw in inv:
+            can = canonicalize_item_name(raw) or raw.lower()
+            if "ring" in can: equip_to_slot(char,"right_hand",raw); break
+    if not char["equipped"]["left_hand"]:
+        for raw in inv:
+            can = canonicalize_item_name(raw) or raw.lower()
+            if "ring" in can and (not char["equipped"]["right_hand"] or (canonicalize_item_name(char["equipped"]["right_hand"]["item"]) or "").lower()!=can):
+                equip_to_slot(char,"left_hand",raw); break
+
+# -------- Normalization helpers to fix legacy saves --------
+def normalize_equipped_entry(entry: dict) -> Optional[dict]:
+    if not isinstance(entry, dict):
+        return None
+    item = entry.get("item", "")
+    stats = entry.get("stats") or lookup_item_stats(item) or {}
+    summary = entry.get("summary") or summarize_item(item, stats)
+    return {"item": item, "stats": stats, "summary": summary}
+
+def normalize_all_equipped(char: dict):
+    ensure_equipped_slots(char)
+    for s in SLOTS:
+        if char["equipped"].get(s):
+            char["equipped"][s] = normalize_equipped_entry(char["equipped"][s])
+
+# --- Derived stats (AC) ---
+
+def compute_ac(char: dict) -> Tuple[int,str]:
+    dex = int(char.get("dex_mod", 0))
+    base = 10
+    dex_add = dex
+    source = ["Base 10"]
+    armor_entry = char.get("equipped",{}).get("body")
+    if armor_entry and armor_entry.get("stats",{}).get("type")=="armor":
+        a = armor_entry["stats"]["armor"]
+        base = a["base"]
+        if a["dex_cap"] is None:
+            dex_add = dex
+            source = [f"{(canonicalize_item_name(armor_entry['item']) or armor_entry['item']).title()} {base}", "Dex"]
+        else:
+            cap = a["dex_cap"]
+            dex_add = max(min(dex, cap), -999)
+            source = [f"{(canonicalize_item_name(armor_entry['item']) or armor_entry['item']).title()} {base}", f"Dex (max {cap})"]
     else:
-        parts=["10 (Base)","+DEX"]
-    shield=0
-    for arm in ("left_arm","right_arm"):
-        eq=char["equipped"].get(arm)
-        if eq and eq.get("stats",{}).get("type")=="shield":
-            shield=max(shield,int(eq["stats"].get("ac_bonus",0)))
-    if shield: parts.append(f"+Shield {shield}")
-    total=base+dex_add+shield
-    return total," ".join(parts)
+        base = 10
+        dex_add = dex
+        source = ["Base 10", "Dex"]
+    shield_bonus = 0
+    for arm in ["left_arm","right_arm"]:
+        e = char.get("equipped",{}).get(arm)
+        if e and e.get("stats",{}).get("type")=="shield":
+            shield_bonus = max(shield_bonus, int(e["stats"].get("ac_bonus",0)))
+    if shield_bonus:
+        source.append(f"Shield +{shield_bonus}")
+    ac = base + dex_add + shield_bonus
+    return ac, " + ".join(source)
 
-def prof_bonus_for_xp(xp:int)->int:
-    pb=2
-    for lvl, xp_min, p in LEVEL_TABLE:
-        if xp>=xp_min: pb=p
-    return pb
+# ===================== SPELLS (SRD-aligned, Lv1 only for now) =====================
 
-def level_for_xp(xp:int)->int:
-    lvl=1
-    for L, xp_min, _ in LEVEL_TABLE:
-        if xp>=xp_min: lvl=L
-    return lvl
+# SRD-ish core spell lists (subset for demo; expand as needed)
+WIZARD_SPELLS_L1 = [
+    "Magic Missile", "Shield", "Mage Armor", "Thunderwave", "Chromatic Orb",
+    "Grease", "Burning Hands", "Sleep", "Detect Magic", "Identify"
+]
+CLERIC_SPELLS_L1 = [
+    "Cure Wounds", "Bless", "Shield of Faith", "Guiding Bolt", "Healing Word",
+    "Detect Evil and Good", "Sanctuary", "Inflict Wounds", "Protection from Evil and Good"
+]
 
-def roll(dice:str)->int:
-    m=re.match(r'(\d+)?d(\d+)([+-]\d+)?$', dice.lower().strip())
-    if not m:
-        try: return int(dice)
-        except: return 0
-    n=int(m.group(1) or 1); sides=int(m.group(2)); mod=int(m.group(3) or 0)
-    return sum(random.randint(1,sides) for _ in range(n))+mod
+CLASS_SPELL_LISTS = {
+    "Wizard": {"1": WIZARD_SPELLS_L1},
+    "Cleric": {"1": CLERIC_SPELLS_L1},
+}
 
-def dm_attack_bonus(char:Dict, weapon_stats:Dict)->int:
-    cls=canonical_class(char.get("race_class"))
-    pb=prof_bonus_for_xp(int(char.get("experience",0)))
-    finesse = "finesse" in (weapon_stats.get("properties") or [])
-    ranged  = bool(weapon_stats.get("ranged"))
-    abil = "dex_mod" if (finesse or ranged) else "str_mod"
-    mod = int(char.get(abil,0))
-    simple_ok = weapon_stats.get("simple", False)
-    martial_ok = not simple_ok
-    prof = False
-    if cls in SIMPLE_WEAPON_PROF and simple_ok: prof=True
-    if cls in MARTIAL_WEAPON_PROF and martial_ok: prof=True
-    return mod + (pb if prof else 0), abil
+# Simple per-class slot model (level 1 only)
+CLASS_SLOT_RULES = {
+    "Wizard": {"1": 2},  # Lv1 slots
+    "Cleric": {"1": 2},
+}
 
-def dm_damage_roll(weapon_stats:Dict, abil_mod:int)->int:
-    dmg=roll(weapon_stats.get("damage","1"))
-    finesse="finesse" in (weapon_stats.get("properties") or [])
-    ranged=bool(weapon_stats.get("ranged"))
-    add = abil_mod if (finesse or not ranged) else 0
-    return max(1, dmg + add)
+def get_class_spell_list(cls: str, level: int = 1) -> List[str]:
+    return CLASS_SPELL_LISTS.get(cls, {}).get(str(level), [])
 
-# =================== Spells (Lv1 demo) ===================
-WIZARD_L1 = ["Magic Missile","Shield","Mage Armor","Burning Hands","Thunderwave","Detect Magic","Identify","Grease","Sleep","Chromatic Orb"]
-CLERIC_L1 = ["Cure Wounds","Bless","Shield of Faith","Guiding Bolt","Healing Word","Detect Evil and Good","Sanctuary","Inflict Wounds","Protection from Evil and Good"]
+# ---- Class canonicalization so subclasses/specializations still count as casters ----
+CASTER_KEYWORDS = {
+    "wizard": "Wizard",
+    "cleric": "Cleric",
+    # add more when you add their lists: "druid": "Druid", "sorcerer": "Sorcerer", etc.
+}
+def canonical_class(name: Optional[str]) -> str:
+    s = (name or "").lower()
+    for k, base in CASTER_KEYWORDS.items():
+        if k in s:
+            return base
+    return (name or "").strip().title()
 
-CLASS_SPELLS = {"Wizard": {"1": WIZARD_L1}, "Cleric": {"1": CLERIC_L1}}
-CLASS_SLOTS  = {"Wizard": {"1": 2}, "Cleric":{"1": 2}}
+def initialize_spellcasting(char: dict):
+    """Add spell fields if the class is a caster."""
+    cls = canonical_class(char.get("race_class"))
+    if cls not in CLASS_SPELL_LISTS:
+        char.setdefault("spells_known", [])
+        char.setdefault("spells_prepared", [])
+        char.setdefault("spell_slots", {})
+        return
 
-def class_spell_list(cls:str, level:int=1)->List[str]:
-    return CLASS_SPELLS.get(cls,{}).get(str(level),[])
+    char.setdefault("spells_known", [])
+    char.setdefault("spells_prepared", [])
+    char.setdefault("spell_slots", {})
 
-def ensure_spell_fields(char:Dict):
-    cls=canonical_class(char.get("race_class"))
-    char.setdefault("spells_known",[])
-    char.setdefault("spells_prepared",[])
-    char.setdefault("spell_slots",{})
-    if cls in CLASS_SLOTS and "1" not in char["spell_slots"]:
-        m = CLASS_SLOTS[cls]["1"]
-        char["spell_slots"]["1"]={"max":m,"current":m}
-    if not char["spells_known"] and cls in CLASS_SPELLS:
-        char["spells_known"]=class_spell_list(cls)[:4]
-    if not char["spells_prepared"] and cls in CLASS_SPELLS:
-        limit = 1 + max(0, int(char.get(CASTING_MOD.get(cls,"int_mod"),0)))
-        base = char["spells_known"][:limit] or class_spell_list(cls)[:limit]
-        char["spells_prepared"]=base
+    # Initialize Lv1 slots
+    if "1" not in char["spell_slots"]:
+        max_slots = CLASS_SLOT_RULES.get(cls, {}).get("1", 0)
+        char["spell_slots"]["1"] = {"max": max_slots, "current": max_slots}
 
-def spell_save_dc(char:Dict)->int:
-    cls=canonical_class(char.get("race_class"))
-    pb=prof_bonus_for_xp(int(char.get("experience",0)))
-    mod=int(char.get(CASTING_MOD.get(cls,"int_mod"),0))
-    return 8 + pb + mod
+    # If no known spells, seed a couple
+    if not char["spells_known"]:
+        base_list = get_class_spell_list(cls, 1)
+        char["spells_known"] = base_list[:4]  # first four as a starter
 
-def consume_slot(char:Dict, level:int=1)->bool:
-    slots=char.get("spell_slots",{}).get(str(level))
-    if not slots: return False
-    if slots["current"]<=0: return False
-    slots["current"]-=1
+    # Prepared rules:
+    # Wizard: prepared <= max(1, INT_mod + 1)
+    # Cleric: prepared <= max(1, WIS_mod + 1)
+    if not char["spells_prepared"]:
+        limit = 2
+        if cls == "Wizard":
+            limit = max(1, int(char.get("int_mod", 0)) + 1)
+        elif cls == "Cleric":
+            limit = max(1, int(char.get("wis_mod", 0)) + 1)
+        char["spells_prepared"] = char["spells_known"][:limit]
+
+def validate_spells_for_class(char: dict):
+    """Strip/replace illegal spells that don't fit the character's class list."""
+    cls = canonical_class(char.get("race_class"))
+    class_list = set(s.lower() for s in get_class_spell_list(cls, 1))
+    if not class_list:
+        char["spells_known"] = []
+        char["spells_prepared"] = []
+        char["spell_slots"] = {}
+        return
+
+    # Normalize known
+    known = []
+    for s in char.get("spells_known", []):
+        if s and s.lower() in class_list:
+            known.append(s)
+    if len(known) < len(char.get("spells_known", [])):
+        # add replacements until we reach original count or exhaust class list
+        originals = len(char.get("spells_known", []))
+        pool = [x for x in get_class_spell_list(cls, 1) if x not in known]
+        while len(known) < min(originals, len(get_class_spell_list(cls, 1))) and pool:
+            known.append(pool.pop(0))
+    char["spells_known"] = known
+
+    # Prepared (subset of known); limit by class rule
+    limit = 2
+    if cls == "Wizard":
+        limit = max(1, int(char.get("int_mod", 0)) + 1)
+    elif cls == "Cleric":
+        limit = max(1, int(char.get("wis_mod", 0)) + 1)
+    prepared = [s for s in char.get("spells_prepared", []) if s in known][:limit]
+    if not prepared:
+        prepared = known[:limit]
+    char["spells_prepared"] = prepared
+
+    # Ensure slots present and clamped
+    slots = char.setdefault("spell_slots", {})
+    if "1" not in slots:
+        max_slots = CLASS_SLOT_RULES.get(cls, {}).get("1", 0)
+        slots["1"] = {"max": max_slots, "current": max_slots}
+    else:
+        s = slots["1"]
+        s["max"] = CLASS_SLOT_RULES.get(cls, {}).get("1", s.get("max", 0))
+        s["current"] = max(0, min(s.get("current", s["max"]), s["max"]))
+
+def cast_spell(char: dict, spell_name: str) -> bool:
+    """Consume a level-1 slot if available and the spell is prepared; return True if cast."""
+    if spell_name not in char.get("spells_prepared", []):
+        return False
+    slots = char.get("spell_slots", {}).get("1")
+    if not slots or slots["current"] <= 0:
+        return False
+    slots["current"] -= 1
     return True
 
-def do_spell_effect(state:Dict, caster:Dict, spell:str, target_name:str=""):
-    logs=[]
-    cname=caster["name"]
-    cls=canonical_class(caster.get("race_class"))
-    if spell not in caster.get("spells_prepared",[]):
-        return [f"{cname} tries to cast {spell}, but it isn't prepared."]
-    if not consume_slot(caster,1):
-        return [f"{cname} has no spell slots left."]
-    dc=spell_save_dc(caster)
-    def get_cbt(name:str)->Optional[Dict]:
-        for c in state["encounter"]["combatants"]:
-            if c["name"].lower()==name.lower(): return c
-        return None
-    if spell=="Cure Wounds":
-        amt = roll("1d8") + max(0, int(caster.get(CASTING_MOD.get(cls,'int_mod'),0)))
-        tgt = get_cbt(target_name) or caster
-        if tgt.get("dead"): return [f"{cname} casts Cure Wounds, but {tgt['name']} is dead."]
-        tgt["current_hp"] = min(tgt["max_hp"], tgt["current_hp"] + amt)
-        logs.append(f"{cname} casts Cure Wounds on {tgt['name']} and restores {amt} HP.")
-    elif spell=="Magic Missile":
-        darts = [roll("1d4")+1 for _ in range(3)]
-        dmg=sum(darts)
-        tgt=get_cbt(target_name) or None
-        if not tgt: return [f"{cname} casts Magic Missile, but no valid target is selected."]
-        tgt["current_hp"]-=dmg
-        logs.append(f"{cname} casts Magic Missile at {tgt['name']} for {dmg} force damage (auto-hit).")
-        if tgt["current_hp"]<=0: handle_ko_or_death(tgt, logs)
-    elif spell=="Burning Hands":
-        dmg_full = sum(roll("1d6") for _ in range(3))
-        tgt=get_cbt(target_name) or None
-        if not tgt: return [f"{cname} casts Burning Hands, but no valid target is selected."]
-        save_roll = random.randint(1,20) + int(tgt.get("dex_mod",0))
-        if save_roll >= dc:
-            dmg = math.floor(dmg_full/2); res="succeeds"
-        else:
-            dmg = dmg_full; res="fails"
-        tgt["current_hp"]-=dmg
-        logs.append(f"{cname} casts Burning Hands; {tgt['name']} {res} DEX save (DC {dc}) and takes {dmg} fire damage.")
-        if tgt["current_hp"]<=0: handle_ko_or_death(tgt, logs)
-    elif spell=="Bless":
-        state["encounter"].setdefault("bless", set())
-        party = [c for c in state["encounter"]["combatants"] if c.get("is_player")]
-        chosen = [c["name"] for c in party[:3]]
-        state["encounter"]["bless"] = set(chosen)
-        logs.append(f"{cname} casts Bless on {', '.join(chosen)}. They add +1d4 to attack rolls while Bless lasts.")
-    else:
-        logs.append(f"{cname} casts {spell}. (Narrative effect not automated.)")
-    return logs
+def short_spellline(char: dict) -> str:
+    """Compact readout for UI: slots and prepared list."""
+    slots = char.get("spell_slots", {}).get("1", {"current":0,"max":0})
+    prepped = ", ".join(char.get("spells_prepared", [])) or "—"
+    return f"Slots (Lv1): {slots['current']}/{slots['max']} | Prepared: {prepped}"
 
-# =================== Monsters & Encounters ===================
-MONSTERS = {
-    "Goblin":  {"ac":15,"hp":7,"str_mod":-1,"dex_mod":2,"con_mod":0,"int_mod":0,"wis_mod":0,"cha_mod":-1,
-                "attack_bonus":4,"damage":"1d6+2","speed":30},
-    "Skeleton":{"ac":13,"hp":13,"str_mod":0,"dex_mod":2,"con_mod":0,"int_mod":-2,"wis_mod":0,"cha_mod":-2,
-                "attack_bonus":4,"damage":"1d6+2","speed":30},
-    "Bandit":  {"ac":12,"hp":11,"str_mod":0,"dex_mod":1,"con_mod":0,"int_mod":0,"wis_mod":0,"cha_mod":0,
-                "attack_bonus":3,"damage":"1d6+1","speed":30},
-    "Wolf":    {"ac":13,"hp":11,"str_mod":2,"dex_mod":2,"con_mod":1,"int_mod":-4,"wis_mod":1,"cha_mod":-2,
-                "attack_bonus":4,"damage":"2d4+2","speed":40},
-}
+# --- JS helper: scroll to top on next render ---
 
-def new_combatant_from_char(c:Dict)->Dict:
-    ac,_=ac_calc(c)
-    return {
-        "is_player": True,
-        "name": c["name"],
-        "ac": ac,
-        "max_hp": int(c.get("current_hp",20)),
-        "current_hp": int(c.get("current_hp",20)),
-        "death_saves": {"success":0,"fail":0},
-        "dead": False,
-        "dex_mod": int(c.get("dex_mod",0)),
-        "str_mod": int(c.get("str_mod",0)),
-        "con_mod": int(c.get("con_mod",0)),
-        "int_mod": int(c.get("int_mod",0)),
-        "wis_mod": int(c.get("wis_mod",0)),
-        "cha_mod": int(c.get("cha_mod",0)),
-        "src_ref": c["name"],
-    }
+def _scroll_to_top():
+    components.html(
+        """
+        <script>
+        window.parent.scrollTo({ top: 0, behavior: 'smooth' });
+        </script>
+        """,
+        height=0,
+    )
 
-def new_monster(name:str, template:str)->Dict:
-    m=MONSTERS[template]
-    return {
-        "is_player": False,
-        "name": name,
-        "ac": m["ac"],
-        "max_hp": m["hp"],
-        "current_hp": m["hp"],
-        "death_saves":{"success":0,"fail":0},
-        "dead": False,
-        "dex_mod": m["dex_mod"],
-        "str_mod": m["str_mod"],
-        "con_mod": m["con_mod"],
-        "int_mod": m["int_mod"],
-        "wis_mod": m["wis_mod"],
-        "cha_mod": m["cha_mod"],
-        "attack_bonus": m["attack_bonus"],
-        "damage": m["damage"],
-        "src_ref": template,
-    }
+# --- Model helpers & prompts ---
 
-def roll_initiative(cbt:Dict)->int:
-    return random.randint(1,20)+int(cbt.get("dex_mod",0))
+SYSTEM_INSTRUCTION_TEMPLATE = """
+You are the ultimate Dungeon Master (DM) and Storyteller for {player_count} players in **{setting}, {genre}**.
+IMPORTANT: Integrate the following user-provided details into the world and character backgrounds:
+Setting Details: {custom_setting_description}
+---
+Follow SRD-aligned rules (D&D 5e SRD-style, CC-BY-4.0) while keeping narration vivid:
+- Use STR for melee attack checks unless a weapon has the *finesse* property; use DEX for ranged.
+- Respect equipment stats and properties provided in the context. Two-handed weapons occupy both arms; no shield simultaneously.
+- Armor Class uses SRD-like formulas (light: base + Dex; medium: base + Dex up to +2; heavy: fixed; shield +2).
+- Spells must be class-appropriate. Wizards cast from Wizard lists; Clerics from Cleric lists. Spell slots are limited and must be consumed when casting.
+- After a skill/attack/spell resolution, include a mechanical line like:
+  "(Target AC {{dc}} vs Roll {{roll}} + Mod {{mod}} = {{total}}. {{'Success' if total >= dc else 'Failure'}})"
+Tone: immersive, tense, dramatic. Output pure narrative unless asked to produce JSON for checks.
+"""
 
-def begin_encounter(state:Dict):
-    party = [new_combatant_from_char(ch) for ch in state["characters"].values()]
-    state["encounter"] = {
-        "active": True,
-        "round": 1,
-        "turn_index": 0,
-        "combatants": party,
-        "initiative": [],
-        "bless": set(),
-        "log": [],
-        "xp_reward": 0
-    }
+def get_api_contents(history_list):
+    contents = []
+    for msg in history_list:
+        if msg.get("content") and isinstance(msg["content"], str):
+            api_role = "model" if msg["role"] == "assistant" else msg["role"]
+            contents.append(Content(role=api_role, parts=[Part(text=msg["content"])]))
+    return contents
 
-def end_encounter(state:Dict):
-    enc=state.get("encounter")
-    if not enc: return
-    defeated = [c for c in enc["combatants"] if not c["is_player"] and (c["dead"] or c["current_hp"]<=0)]
-    xp = 50*len(defeated)
-    state["encounter"]["xp_reward"]=xp
-    living_players = [name for name,ch in state["characters"].items() if ch.get("current_hp",1)>0]
-    if living_players:
-        share = xp // len(living_players)
-        for n in living_players:
-            state["characters"][n]["experience"] = int(state["characters"][n].get("experience",0))+share
-    state["encounter"]["active"]=False
+def safe_model_text(resp) -> str:
+    try:
+        if hasattr(resp,"text") and resp.text and resp.text.strip():
+            return resp.text.strip()
+        if hasattr(resp,"candidates") and resp.candidates:
+            for c in resp.candidates:
+                if hasattr(c,"content") and getattr(c.content,"parts",None):
+                    for p in c.content.parts:
+                        if getattr(p,"text",None) and p.text.strip():
+                            return p.text.strip()
+        if hasattr(resp,"prompt_feedback") and getattr(resp.prompt_feedback,"block_reason",None):
+            return f"(Model returned no text; block_reason={resp.prompt_feedback.block_reason})"
+    except Exception:
+        pass
+    return "(No model text returned.)"
 
-def handle_ko_or_death(cbt:Dict, logs:List[str]):
-    if cbt["current_hp"]>0: return
-    if cbt["is_player"]:
-        cbt["current_hp"]=0
-        logs.append(f"{cbt['name']} falls to 0 HP and begins making death saving throws.")
-    else:
-        cbt["dead"]=True
-        logs.append(f"{cbt['name']} is slain.")
+# --- Narrative “system action” helper (consumes a turn) ---
 
-def perform_death_save(cbt:Dict, logs:List[str]):
-    if cbt["current_hp"]>0 or not cbt["is_player"] or cbt["dead"]: return
-    roll_ = random.randint(1,20)
-    if roll_==1:
-        cbt["death_saves"]["fail"]+=2; res="critical fail (2 fails)"
-    elif roll_==20:
-        cbt["current_hp"]=1; cbt["death_saves"]={"success":0,"fail":0}; res="critical success—back to 1 HP!"
-    elif roll_>=10:
-        cbt["death_saves"]["success"]+=1; res="success"
-    else:
-        cbt["death_saves"]["fail"]+=1; res="fail"
-    logs.append(f"{cbt['name']} makes a death save: {roll_} → {res}.")
-    if cbt["death_saves"]["success"]>=3:
-        logs.append(f"{cbt['name']} stabilizes at 0 HP.")
-    if cbt["death_saves"]["fail"]>=3:
-        cbt["dead"]=True
-        logs.append(f"{cbt['name']} dies.")
+def consume_action_and_narrate(action_text: str):
+    st.session_state["history"].append({"role": "user", "content": action_text})
+    try:
+        final_narrative_config = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"])
+        narr_resp = client.models.generate_content(model='gemini-2.5-flash',
+                                                   contents=get_api_contents(st.session_state["history"]),
+                                                   config=final_narrative_config)
+        text = safe_model_text(narr_resp)
+        st.session_state["history"].append({"role": "assistant", "content": text})
+    except Exception as e:
+        st.session_state["history"].append({"role": "assistant", "content": f"Narrative error: {e}"})
+    # NEW: request a top scroll on the next render
+    st.session_state["_scroll_to_top"] = True
+    st.rerun()
 
-# =================== Session Init (with safe flags) ===================
-def init_state():
-    for k,v in [
-        ("history",[]), ("characters",{}), ("current_player",None),
-        ("page","SETUP"), ("adventure_started",False),
-        ("custom_setting_description",""), ("setup_setting","Classic Fantasy"),
-        ("setup_genre","High Magic Quest"), ("setup_difficulty","Normal (Balanced)"),
-        ("use_ai_narration", USE_AI_NARRATION_DEFAULT and (client is not None)),
-        ("system_instruction", SYSTEM_INSTRUCTION),
-        ("encounter", None), ("_scroll_to_top", False),
-        ("_reset_setup_fields", False),
-        ("_opening_done", False),  # NEW: create an AI opening once per game
-    ]:
-        st.session_state.setdefault(k,v)
-init_state()
+# --- Character creation / game flow ---
 
-# =================== Character Creation ===================
-SETTINGS_OPTIONS = {
-    "Classic Fantasy": ["High Magic Quest","Gritty Dungeon Crawl","Political Intrigue"],
-    "Post-Apocalypse": ["Mutant Survival","Cybernetic Wasteland","Resource Scarcity"],
-    "Cyberpunk": ["Corporate Espionage","Street Gang Warfare","AI Revolution"],
-}
-CLASS_OPTIONS = {
-    "Classic Fantasy": ["Fighter","Wizard","Rogue","Cleric","Barbarian"],
-    "Post-Apocalypse": ["Scavenger","Mutant","Tech Specialist","Warlord","Drifter"],
-    "Cyberpunk": ["Street Samurai","Netrunner","Corpo","Techie","Gang Enforcer"],
-}
-RACE_OPTIONS = {
-    "Classic Fantasy": ["Human","Elf","Dwarf","Halfling","Orc","Tiefling"],
-    "Post-Apocalypse": ["Human","Mutant","Android","Cyborg","Beastkin"],
-    "Cyberpunk": ["Human","Cyborg","Augmented","Synth","Clone"],
-}
-RACE_MODS = {
-    "Human":{}, "Elf":{"dex_mod":1,"int_mod":1,"con_mod":-1}, "Dwarf":{"con_mod":2,"cha_mod":-1},
-    "Halfling":{"dex_mod":1,"str_mod":-1}, "Orc":{"str_mod":2,"int_mod":-1,"cha_mod":-1},
-    "Tiefling":{"cha_mod":1,"int_mod":1,"wis_mod":-1},
-    "Mutant":{"str_mod":1,"con_mod":1,"cha_mod":-1}, "Android":{"int_mod":2,"wis_mod":-1},
-    "Cyborg":{"str_mod":1,"con_mod":1,"dex_mod":-1}, "Beastkin":{"dex_mod":1,"wis_mod":1,"int_mod":-1},
-    "Augmented":{"dex_mod":1,"int_mod":1,"wis_mod":-1}, "Synth":{"int_mod":2,"cha_mod":-1}, "Clone":{"wis_mod":1,"cha_mod":-1},
-}
+def apply_race_modifiers(char_data: dict, race: str):
+    mods = RACE_MODIFIERS.get(race, {})
+    for k, delta in mods.items():
+        char_data[k] = char_data.get(k, 0) + delta
 
-def create_character(name:str, race:str, role:str, desc:str)->Dict:
-    mods = {"str_mod":0,"dex_mod":0,"con_mod":0,"int_mod":0,"wis_mod":0,"cha_mod":0}
-    if "Fighter" in role or "Barbarian" in role: mods["str_mod"]=2
-    if "Rogue" in role: mods["dex_mod"]=2
-    if "Wizard" in role: mods["int_mod"]=2
-    if "Cleric" in role: mods["wis_mod"]=2
-    for k,delta in RACE_MODS.get(race,{}).items(): mods[k]+=delta
-    for k in mods: mods[k]=max(-1, min(3, mods[k]))
-    inv = ["longsword","leather armor","shield","boots","ring","amulet","helm"] if role in ("Fighter","Cleric","Barbarian") else \
-          ["rapier","leather armor","dagger","boots","ring","amulet","helm"]
-    char = {
-        "name": name, "race": race, "race_class": role, "description": desc,
-        **mods,
-        "current_hp": 20, "max_hp": 20, "morale_sanity": 100,
-        "inventory": inv, "experience": 0, "level": 1, "equipped": {}
-    }
-    ensure_equipped(char)
-    if "leather armor" in inv: equip(char,"body","leather armor")
-    weapon = "longsword" if "longsword" in inv else "rapier" if "rapier" in inv else inv[0]
-    equip(char,"right_arm",weapon)
-    if "shield" in inv: equip(char,"left_arm","shield")
-    if "boots" in inv: equip(char,"feet","boots")
-    if "helm" in inv: equip(char,"head","helm")
-    if "ring" in inv: equip(char,"right_hand","ring")
-    if "amulet" in inv: equip(char,"neck","amulet")
-    cls=canonical_class(role)
-    if cls in CLASS_SPELLS:
-        ensure_spell_fields(char)
-    return char
+def initialize_or_validate_spells(char: dict):
+    initialize_spellcasting(char)
+    validate_spells_for_class(char)
 
-# =================== UI: Setup ===================
-st.title("🧙 RPG Storyteller DM (AI-driven narrative + SRD mechanics)")
+def create_new_character_handler(setting, genre, race, player_name, selected_class, custom_char_desc, difficulty):
+    if not player_name or player_name in st.session_state["characters"]:
+        st.error("Please enter a unique name for the new character.")
+        return
 
-if st.session_state["page"]=="SETUP":
-    if st.session_state.get("_reset_setup_fields"):
-        st.session_state["_reset_setup_fields"] = False
-        st.session_state["setup_name"] = ""
-        st.session_state["setup_desc"] = ""
+    final_system_instruction = SYSTEM_INSTRUCTION_TEMPLATE.format(
+        setting=setting,
+        genre=genre,
+        player_count=len(st.session_state["characters"]) + 1,
+        custom_setting_description=st.session_state.get('custom_setting_description', "")
+    )
+    
+    creation_prompt = f"""
+    Create a starting character named {player_name} for {setting}/{genre}.
+    Class: {selected_class}. Race: {race}.
+    Description (player-provided): {custom_char_desc if custom_char_desc else "None provided; invent suitable flavor."}
+    Constraints: attribute modifiers between -1 and +3; starting HP 20; Morale/Sanity 100; inventory 3-5 items suitable for SRD fantasy.
+    Return ONLY the required JSON schema.
+    """
+    with st.spinner(f"Creating {player_name}..."):
+        try:
+            char_config = GenerateContentConfig(system_instruction=final_system_instruction,
+                                                response_mime_type="application/json",
+                                                response_schema=CharacterSheet)
+            resp = client.models.generate_content(model='gemini-2.5-flash',
+                                                  contents=creation_prompt,
+                                                  config=char_config)
+            raw = resp.text or ""
+            if not raw.strip():
+                st.error("Character creation returned no text.")
+                return
+            char_data = json.loads(raw)
+            char_data['name'] = player_name
+            char_data['race'] = race
 
-    st.header("1) Campaign Setup")
-    c1,c2 = st.columns([1,2])
-    with c1:
-        st.selectbox("Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
-        st.selectbox("Genre", SETTINGS_OPTIONS[st.session_state["setup_setting"]], key="setup_genre")
-        st.selectbox("Difficulty", ["Easy (Narrative Focus)","Normal (Balanced)","Hard (Lethal)"], key="setup_difficulty")
-        if not client and USE_AI_NARRATION_DEFAULT:
-            st.warning("AI narration is ON by default, but no GEMINI_API_KEY found in secrets. Add it for full storytelling.")
-        st.toggle("AI storyteller", key="use_ai_narration",
-                  value=(st.session_state["use_ai_narration"] if client else False),
-                  help="If enabled (and API key configured), the AI will narrate scenes.")
-    with c2:
-        st.text_area("World details (optional)", key="custom_setting_description", height=120,
-                     placeholder="City under a toxic dome; air filters are currency...")
+            # Ensure numeric mods exist
+            for k in ["str_mod","dex_mod","con_mod","int_mod","wis_mod","cha_mod"]:
+                char_data.setdefault(k, 0)
 
-    st.markdown("---")
-    st.header("2) Create Your Party")
-    cc1, cc2 = st.columns([1,2])
-    with cc1:
-        role_list = CLASS_OPTIONS[st.session_state["setup_setting"]]
-        role = st.selectbox("Class/Role", role_list, key="setup_role")
-        name = st.text_input("Character Name", key="setup_name")
-        race = st.selectbox("Race", RACE_OPTIONS[st.session_state["setup_setting"]], key="setup_race")
-        if st.button("Add Character"):
-            if not name.strip():
-                st.error("Please provide a character name.")
-            elif name in st.session_state["characters"]:
-                st.error("Name already used.")
-            else:
-                ch = create_character(name, race, role, st.session_state.get("setup_desc",""))
-                st.session_state["characters"][name]=ch
-                if not st.session_state["current_player"]:
-                    st.session_state["current_player"]=name
-                st.success(f"Added {name} ({race} {role}).")
-                st.session_state["_reset_setup_fields"] = True
-                st.rerun()
-    with cc2:
-        st.text_area("Character Description (optional)", key="setup_desc", height=120)
-        if st.session_state["characters"]:
-            st.markdown("**Party:** " + ", ".join(st.session_state["characters"].keys()))
-        else:
-            st.info("No characters yet.")
+            # Canonicalize class for spell system visibility
+            char_data['race_class'] = canonical_class(char_data.get('race_class'))
 
-    st.markdown("---")
-    st.header("3) Start Game")
-    if st.session_state["characters"]:
-        if st.button("🚀 Begin Adventure"):
-            st.session_state["adventure_started"]=True
-            st.session_state["page"]="GAME"
-            st.session_state["_scroll_to_top"]=True
-            st.session_state["_opening_done"]=False  # make sure we create opening once
-            _scroll_to_top()
+            apply_race_modifiers(char_data, race)
+
+            ensure_equipped_slots(char_data)
+            auto_equip_defaults(char_data)
+            normalize_all_equipped(char_data)
+
+            # Spellcasting init & cleanup (e.g., remove Wizard-inappropriate spells like Cure Wounds)
+            initialize_or_validate_spells(char_data)
+
+            st.session_state["final_system_instruction"] = final_system_instruction
+            st.session_state["characters"][player_name] = char_data
+            if not st.session_state["current_player"]:
+                st.session_state["current_player"] = player_name
+            
+            st.session_state["history"].append({"role": "assistant", "content": f"{player_name} ({race}) joins the party."})
+
+        except Exception as e:
+            st.error(f"Character creation failed for {player_name}: {e}")
+            st.session_state["history"].append({"role": "assistant", "content": f"Character creation error: {e}"})
+
+    st.session_state["new_player_name_input_setup_value"] = ""
+    st.session_state["custom_character_description"] = ""
+    st.rerun() 
+
+def extract_roll(text):
+    m = re.search(r'\b(roll|rolls|rolled|try|trying|tries)\s+(\d{1,2})\b', text or "", re.IGNORECASE)
+    if m:
+        val = int(m.group(2))
+        if 1 <= val <= 20: return val
+    return None
+
+def start_adventure_handler():
+    start_adventure(st.session_state["setup_setting"], st.session_state["setup_genre"])
+
+def start_adventure(setting, genre):
+    if st.session_state["current_player"] is None:
+        st.error("Please create at least one character before starting the adventure!")
+        return
+    for _n, _c in st.session_state["characters"].items():
+        ensure_equipped_slots(_c); auto_equip_defaults(_c); normalize_all_equipped(_c)
+        initialize_or_validate_spells(_c)
+    intro_prompt = f"""
+    Start a dramatic 3–4 paragraph introduction for {setting} / {genre}.
+    Name the starting location; set vivid scene; present a clear inciting situation;
+    end by asking {st.session_state['current_player']} what they do next.
+    """
+    with st.spinner("Spinning up the world..."):
+        try:
+            final_narrative_config = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"])
+            resp = client.models.generate_content(model='gemini-2.5-flash', contents=intro_prompt, config=final_narrative_config)
+            text = safe_model_text(resp)
+            st.session_state["history"] = [{"role": "assistant", "content": text}]
+            st.session_state["adventure_started"] = True
+            st.session_state["page"] = "GAME"
             st.rerun()
-    else:
-        st.warning("Create at least one character.")
+        except Exception as e:
+            st.error(f"Failed to start adventure: {e}")
+            st.session_state["history"].append({"role": "assistant", "content": f"Start error: {e}"})
 
-# =================== UI: Game ===================
-if st.session_state["page"]=="GAME":
+def save_game():
+    if not st.session_state["adventure_started"]:
+        st.warning("Adventure must be started to save game.")
+        return
+    game_state = {
+        "history": st.session_state["history"],
+        "characters": st.session_state["characters"],
+        "system_instruction": st.session_state["final_system_instruction"],
+        "current_player": st.session_state["current_player"],
+        "adventure_started": st.session_state["adventure_started"],
+        "setting": st.session_state["setup_setting"], 
+        "genre": st.session_state["setup_genre"],
+        "difficulty": st.session_state["setup_difficulty"],
+        "custom_setting_description": st.session_state["custom_setting_description"],
+    }
+    st.session_state["saved_game_json"] = json.dumps(game_state, indent=2)
+    st.success("Game state saved. Use Download to save the file.")
+
+def load_game(uploaded_file):
+    if uploaded_file is not None:
+        try:
+            bytes_data = uploaded_file.read()
+            loaded = json.loads(bytes_data)
+            st.session_state["__LOAD_DATA__"] = loaded
+            st.session_state["__LOAD_FLAG__"] = True
+            st.success("Adventure loaded. Restarting session...")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error loading file: {e}. Ensure valid JSON.")
+
+# --- staged load (before widgets) ---
+if "__LOAD_FLAG__" in st.session_state and st.session_state["__LOAD_FLAG__"]:
+    d = st.session_state["__LOAD_DATA__"]
+    st.session_state["history"] = d["history"]
+    st.session_state["characters"] = d["characters"]
+    st.session_state["final_system_instruction"] = d["system_instruction"]
+    st.session_state["current_player"] = d["current_player"]
+    st.session_state["adventure_started"] = d["adventure_started"]
+    st.session_state["setup_setting"] = d.get("setting", "Post-Apocalypse")
+    st.session_state["setup_genre"] = d.get("genre", "Mutant Survival")
+    st.session_state["setup_difficulty"] = d.get("difficulty", "Normal (Balanced)") 
+    st.session_state["custom_setting_description"] = d.get("custom_setting_description", "")
+    for k, v in st.session_state["characters"].items():
+        # normalize class and systems on load
+        v['race_class'] = canonical_class(v.get('race_class'))
+        ensure_equipped_slots(v)
+        normalize_all_equipped(v)
+        initialize_or_validate_spells(v)
+    st.session_state["page"] = "GAME"
+    st.session_state["__LOAD_FLAG__"] = False
+    del st.session_state["__LOAD_DATA__"]
+
+# --- Init session state ---
+st.title("🧙 RPG Storyteller DM (SRD-Aligned)")
+
+for key, default in [
+    ("history", []), ("characters", {}), ("current_player", None),
+    ("final_system_instruction", None), ("new_player_name", ""),
+    ("adventure_started", False), ("saved_game_json", ""),
+    ("__LOAD_FLAG__", False), ("__LOAD_DATA__", None),
+    ("page", "SETUP"), ("custom_setting_description", ""),
+    ("custom_character_description", ""), ("new_player_name_input_setup_value", ""),
+    ("setup_race", None), ("_scroll_to_top", False)  # NEW: scroll flag default
+]:
+    if key not in st.session_state: st.session_state[key] = default
+
+# =========================================================================
+# PAGE 1: SETUP VIEW
+# =========================================================================
+if st.session_state["page"] == "SETUP":
+    st.header("1. Define Your Campaign World")
+    col_world_settings, col_world_description = st.columns([1, 2])
+    
+    with col_world_settings:
+        st.subheader("Core Setting")
+        _ = st.selectbox("Choose Setting", list(SETTINGS_OPTIONS.keys()), key="setup_setting")
+        _ = st.selectbox("Choose Genre", SETTINGS_OPTIONS[st.session_state["setup_setting"]], key="setup_genre")
+        st.subheader("Difficulty")
+        _ = st.selectbox("Game Difficulty", list(DIFFICULTY_OPTIONS.keys()), key="setup_difficulty")
+        st.caption(DIFFICULTY_OPTIONS[st.session_state["setup_difficulty"]])
+        st.markdown("---")
+        st.subheader("Load Existing Game")
+        uploaded_file = st.file_uploader("Load Adventure File", type="json")
+        if uploaded_file is not None and st.button("Load"):
+            load_game(uploaded_file)
+
+    with col_world_description:
+        st.subheader("Custom World Details")
+        st.session_state["custom_setting_description"] = st.text_area(
+            "Setting Details (optional)", 
+            value=st.session_state["custom_setting_description"], 
+            height=200, 
+            placeholder="Example: The city is built inside an enormous, toxic dome. The main currency is clean air filters."
+        )
+
+    st.markdown("---")
+    st.header("2. Create Your Party")
+
+    col_char_creation, col_char_details = st.columns([1, 2])
+
+    with col_char_creation:
+        st.subheader("New Character")
+        selected_class_list = CLASS_OPTIONS[st.session_state.get('setup_setting', 'Classic Fantasy')]
+        _ = st.selectbox("Choose Class/Role", selected_class_list, key="setup_class")
+        _ = st.text_input("Character Name", value=st.session_state["new_player_name_input_setup_value"], key="new_player_name_input_setup")
+        if st.session_state["characters"]:
+            st.markdown(f"**Party Roster ({len(st.session_state['characters'])}):**")
+            st.markdown(f"{', '.join(st.session_state['characters'].keys())}")
+        
+    with col_char_details:
+        st.subheader("Character Description")
+        st.session_state["custom_character_description"] = st.text_area(
+            "Character Details", 
+            value=st.session_state["custom_character_description"], 
+            height=150, 
+            placeholder="Example: A tall, paranoid ex-corporate guard with a cybernetic eye and a fear of heights."
+        )
+        race_choices = RACE_OPTIONS.get(st.session_state["setup_setting"], ["Human"])
+        st.session_state["setup_race"] = st.selectbox("Race", race_choices, index=0)
+
+    if col_char_creation.button("Add Character to Party"):
+        if st.session_state["new_player_name_input_setup"]:
+            create_new_character_handler(
+                st.session_state["setup_setting"], 
+                st.session_state["setup_genre"],
+                st.session_state["setup_race"],
+                st.session_state["new_player_name_input_setup"],
+                st.session_state["setup_class"],
+                st.session_state["custom_character_description"],
+                st.session_state["setup_difficulty"]
+            )
+        else:
+            st.error("Please provide a Character Name.")
+
+    st.markdown("---")
+    st.header("3. Start Game")
+    if st.session_state["current_player"]:
+        st.success(f"Party ready! {len(st.session_state['characters'])} player(s) created.")
+        st.button("🚀 START ADVENTURE", on_click=start_adventure_handler, type="primary")
+    else:
+        st.warning("Create at least one character to start.")
+
+# =========================================================================
+# PAGE 2: GAME VIEW
+# =========================================================================
+elif st.session_state["page"] == "GAME":
+    # NEW: If previous action requested a top scroll, do it now and clear the flag
     if st.session_state.get("_scroll_to_top"):
         _scroll_to_top()
-        st.session_state["_scroll_to_top"]=False
+        st.session_state["_scroll_to_top"] = False
 
-    # ----- Opening scene via AI storyteller (once) -----
-    if st.session_state["adventure_started"] and not st.session_state["_opening_done"]:
-        if st.session_state.get("use_ai_narration",False) and client:
-            text = ai_narrate_block(st.session_state, "")
-            st.session_state["history"].append({"role":"assistant","content": text})
-        else:
-            st.session_state["history"].append({"role":"assistant","content": offline_narrator_opening(st.session_state)})
-        st.session_state["_opening_done"]=True
+    col_chat = st.container()
+    game_started = st.session_state["adventure_started"]
 
-    # Sidebar: Active Player + Controls (same as before)
     with st.sidebar:
         with st.expander("Active Player", expanded=True):
             if st.session_state["characters"]:
-                options=list(st.session_state["characters"].keys())
-                idx = options.index(st.session_state["current_player"]) if st.session_state["current_player"] in options else 0
-                def on_change_player():
-                    st.session_state["current_player"]=st.session_state["player_sel"]
-                    st.session_state["_scroll_to_top"]=True
-                    st.rerun()
-                st.selectbox("Current Turn", options, index=idx, key="player_sel", on_change=on_change_player)
-                ch=st.session_state["characters"][st.session_state["current_player"]]
-                ac, ac_src = ac_calc(ch)
-                ch["level"]=level_for_xp(int(ch["experience"]))
-                pb = prof_bonus_for_xp(int(ch["experience"]))
-                st.markdown(f"**{ch['name']}** — {ch['race']} {ch['race_class']}")
-                st.markdown(f"**Level:** {ch['level']} | **XP:** {ch['experience']} | **Proficiency:** +{pb}")
-                st.markdown(f"**HP:** {ch['current_hp']}/{ch.get('max_hp', ch['current_hp'])}")
-                st.markdown(f"**AC:** {ac}  \n<small>({ac_src})</small>", unsafe_allow_html=True)
-                st.markdown("**Ability Modifiers**")
-                c1,c2,c3=st.columns(3)
-                with c1: st.markdown(f"STR {ch['str_mod']}  \nDEX {ch['dex_mod']}")
-                with c2: st.markdown(f"CON {ch['con_mod']}  \nINT {ch['int_mod']}")
-                with c3: st.markdown(f"WIS {ch['wis_mod']}  \nCHA {ch['cha_mod']}")
-                st.markdown("---")
-                st.markdown("**Inventory & Equipment**")
-                for i, itm in enumerate(ch["inventory"]):
-                    cA,cB,cC=st.columns([4,3,2])
-                    with cA: st.markdown(f"- {itm}")
-                    with cB:
-                        slot = st.selectbox("Slot", [SLOT_LABEL[s] for s in SLOTS], key=f"invslot_{i}")
-                    with cC:
-                        slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot]
-                        if st.button("Equip", key=f"equip_{i}"):
-                            equip(ch, slot_key, itm)
-                            st.session_state["_scroll_to_top"]=True
-                            st.rerun()
-                st.markdown("**Equipped:**")
-                for s in SLOTS:
-                    e=ch["equipped"].get(s)
-                    label=SLOT_LABEL[s]
-                    if e:
-                        stats=e.get("stats",{})
-                        if stats.get("type")=="weapon":
-                            more=f"{stats.get('damage')} dmg; {'finesse ' if 'finesse' in (stats.get('properties') or []) else ''}{'(ranged)' if stats.get('ranged') else ''}"
-                        elif stats.get("type")=="shield":
-                            more=f"+{stats.get('ac_bonus',0)} AC shield"
-                        elif stats.get("type")=="armor":
-                            a=stats["armor"]; cap=a["dex_cap"]; dex=f"+DEX" if cap is None else (f"+DEX (max {cap})" if cap>0 else "")
-                            more=f"{a['category']} AC {a['base']} {dex}"
-                        else:
-                            more=", ".join((stats.get("properties") or [])) or "—"
-                        st.markdown(f"- **{label}**: {e['item']} — {more}")
-                    else:
-                        st.markdown(f"- **{label}**: —")
+                player_options = list(st.session_state["characters"].keys())
+                default_index = (player_options.index(st.session_state["current_player"])
+                                 if st.session_state["current_player"] in player_options else 0)
 
-                cls=canonical_class(ch.get("race_class"))
-                if cls in CLASS_SPELLS:
-                    ensure_spell_fields(ch)
+                def _on_player_change():
+                    st.session_state["current_player"] = st.session_state["player_selector"]; 
+                    st.session_state["_scroll_to_top"] = True  # keep UX consistent when switching
+                    st.rerun()
+
+                st.selectbox("Current Turn", player_options, key="player_selector",
+                             index=default_index, disabled=not game_started, on_change=_on_player_change)
+
+                active_char = st.session_state["characters"].get(st.session_state["current_player"])
+                st.markdown("---")
+                if active_char:
+                    ensure_equipped_slots(active_char)
+                    normalize_all_equipped(active_char)
+                    # normalize class on the fly (covers old saves)
+                    active_char['race_class'] = canonical_class(active_char.get('race_class'))
+                    initialize_or_validate_spells(active_char)
+
+                    ac_val, ac_src = compute_ac(active_char)
+                    st.markdown(f"**Name:** {active_char.get('name','')}")
+                    st.markdown(f"**Race:** {active_char.get('race','')}")
+                    st.markdown(f"**Class:** {active_char.get('race_class','')}")
+                    st.markdown(f"**HP:** {active_char.get('current_hp','')}")
+                    st.markdown(f"**AC:** {ac_val}  \n<small>({ac_src})</small>", unsafe_allow_html=True)
+                    st.markdown(f"**Sanity/Morale:** {active_char.get('morale_sanity','')}")
+
+                    # Inventory with equip buttons
+                    st.markdown("**Inventory:**")
+                    if active_char.get("inventory"):
+                        for idx, item in enumerate(active_char["inventory"]):
+                            candidates = detect_candidate_slots(item)
+                            c0, c1, c2 = st.columns([4,3,2])
+                            with c0: st.markdown(f"- {item}")
+                            with c1:
+                                slot_choice = st.selectbox("Slot", [SLOT_LABEL[s] for s in candidates],
+                                                           key=f"slot_select_{active_char['name']}_{idx}")
+                            with c2:
+                                slot_key = {v:k for k,v in SLOT_LABEL.items()}[slot_choice]
+                                occupied = None
+                                for s in SLOTS:
+                                    eqs = active_char["equipped"].get(s)
+                                    if eqs and (canonicalize_item_name(eqs.get("item","")) or eqs.get("item","")).lower() == (canonicalize_item_name(item) or item).lower():
+                                        occupied = s; break
+                                if occupied:
+                                    if st.button("Unequip", key=f"inv_unequip_{active_char['name']}_{idx}"):
+                                        unequip_slot(active_char, occupied)
+                                        consume_action_and_narrate(f"({active_char['name']}) spends their turn unequipping {item}.")
+                                else:
+                                    if st.button("Equip", key=f"inv_equip_{active_char['name']}_{idx}"):
+                                        equip_to_slot(active_char, slot_key, item)
+                                        stats = lookup_item_stats(item) or {}
+                                        if stats.get("type")=="weapon" and stats.get("hands",1)==2:
+                                            consume_action_and_narrate(f"({active_char['name']}) equips {item} (two-handed) and readies themselves.")
+                                        else:
+                                            consume_action_and_narrate(f"({active_char['name']}) equips {item} to the {SLOT_LABEL[slot_key]}.")
+
+                    else:
+                        st.caption("— (empty)")
+
+                    # Equipped with auto summaries
+                    st.markdown("**Equipped (by slot):**")
+                    for s in SLOTS:
+                        eq = active_char["equipped"].get(s)
+                        label = SLOT_LABEL[s]
+                        if eq:
+                            _summary = eq.get("summary") or summarize_item(eq.get("item",""), eq.get("stats", {}))
+                            st.markdown(f"- **{label}:** {_summary}")
+                        else:
+                            st.markdown(f"- **{label}:** —")
+
                     st.markdown("---")
-                    st.subheader("Spells (Level 1)")
-                    slots=ch["spell_slots"]["1"]
-                    st.markdown(f"**Slots:** {slots['current']}/{slots['max']}  \n**Prepared:** {', '.join(ch['spells_prepared']) or '—'}")
-                    with st.expander("Manage Known & Prepared", expanded=False):
-                        avail=class_spell_list(cls,1)
-                        known = st.multiselect("Known Spells", options=avail, default=[s for s in ch["spells_known"] if s in avail], key="known_list")
-                        limit = 1 + max(0, int(ch.get(CASTING_MOD.get(cls,"int_mod"),0)))
-                        prepared = st.multiselect(f"Prepared (max {limit})", options=known, default=[s for s in ch["spells_prepared"] if s in known][:limit], key="prep_list")
-                        if st.button("Save Spells"):
-                            ch["spells_known"]=known
-                            ch["spells_prepared"]=prepared[:limit]
-                            st.success("Spells updated.")
+                    st.markdown("**Ability Modifiers**")
+                    c1,c2,c3 = st.columns(3)
+                    with c1: st.markdown(f"**STR**: {active_char.get('str_mod', 0)}")
+                    with c2: st.markdown(f"**DEX**: {active_char.get('dex_mod', 0)}")
+                    with c3: st.markdown(f"**CON**: {active_char.get('con_mod', 0)}")
+                    c4,c5,c6 = st.columns(3)
+                    with c4: st.markdown(f"**INT**: {active_char.get('int_mod', 0)}")
+                    with c5: st.markdown(f"**WIS**: {active_char.get('wis_mod', 0)}")
+                    with c6: st.markdown(f"**CHA**: {active_char.get('cha_mod', 0)}")
+
+                    # ---------- SPELLS UI ----------
+                    cls = canonical_class(active_char.get("race_class"))
+                    class_spell_list = get_class_spell_list(cls, 1)
+                    if class_spell_list:
+                        st.markdown("---")
+                        st.subheader("Spells (Level 1)")
+                        slots = active_char["spell_slots"]["1"]
+                        st.markdown(f"**Slots:** {slots['current']}/{slots['max']}  \n**Prepared:** {', '.join(active_char['spells_prepared']) or '—'}")
+
+                        # Manage known spells (bounded to class list)
+                        with st.expander("Manage Known & Prepared", expanded=False):
+                            new_known = st.multiselect(
+                                "Known Spells",
+                                options=class_spell_list,
+                                default=[s for s in active_char["spells_known"] if s in class_spell_list],
+                                help="Choose spells your class can learn.",
+                                key=f"known_{active_char['name']}"
+                            )
+                            # Prepared limit
+                            limit = 2
+                            if cls == "Wizard":
+                                limit = max(1, int(active_char.get("int_mod", 0)) + 1)
+                            elif cls == "Cleric":
+                                limit = max(1, int(active_char.get("wis_mod", 0)) + 1)
+
+                            new_prepped = st.multiselect(
+                                f"Prepared Spells (max {limit})",
+                                options=new_known,
+                                default=[s for s in active_char["spells_prepared"] if s in new_known][:limit],
+                                key=f"prep_{active_char['name']}"
+                            )
+                            if st.button("Save Spells", key=f"save_spells_{active_char['name']}"):
+                                active_char["spells_known"] = new_known
+                                active_char["spells_prepared"] = new_prepped[:limit]
+                                validate_spells_for_class(active_char)
+                                st.success("Spells updated.")
+
+                        # Casting UI
+                        cA, cB = st.columns([3,1])
+                        with cA:
+                            cast_choice = st.selectbox(
+                                "Cast a prepared spell",
+                                options=["—"] + active_char["spells_prepared"],
+                                key=f"cast_sel_{active_char['name']}"
+                            )
+                        with cB:
+                            if st.button("Cast", key=f"cast_btn_{active_char['name']}"):
+                                if cast_choice and cast_choice != "—":
+                                    if cast_spell(active_char, cast_choice):
+                                        consume_action_and_narrate(
+                                            f"({active_char['name']}) casts {cast_choice}. Expend one level-1 spell slot."
+                                        )
+                                    else:
+                                        st.error("Cannot cast: not prepared or no slots remaining.")
+
+            else:
+                st.info("No characters created yet.")
 
         st.header("Game Controls")
-        with st.expander("Encounter Manager", expanded=True):
-            enc=st.session_state.get("encounter")
-            if not enc or not enc.get("active"):
-                if st.button("Start Encounter"):
-                    begin_encounter(st.session_state)
-                    st.success("Encounter started. Add monsters below and roll initiative.")
-                    st.session_state["_scroll_to_top"]=True; st.rerun()
-            else:
-                st.info(f"Round {enc['round']} | Turn: {enc['turn_index']+1}/{len(enc['combatants'])}")
-
-            if st.session_state.get("encounter"):
-                enc=st.session_state["encounter"]
-                if enc.get("active"):
-                    mC1,mC2 = st.columns([2,1])
-                    with mC1:
-                        mtype = st.selectbox("Add Monster (template)", list(MONSTERS.keys()), key="mtype")
-                        mname = st.text_input("Monster Name", value=f"{mtype} #{random.randint(1,99)}", key="mname")
-                    with mC2:
-                        if st.button("Add"):
-                            enc["combatants"].append(new_monster(mname or mtype, mtype))
-                            st.success(f"Added {mname or mtype}.")
-                    st.markdown("**Combatants:**")
-                    for cbt in enc["combatants"]:
-                        st.markdown(f"- {cbt['name']} — AC {cbt['ac']} | HP {cbt['current_hp']}/{cbt['max_hp']} {'(DEAD)' if cbt.get('dead') else ''}")
-
-                    st.markdown("---")
-                    if not enc["initiative"]:
-                        if st.button("Roll Initiative For All"):
-                            init = []
-                            for c in enc["combatants"]:
-                                init.append((c["name"], roll_initiative(c)))
-                            init.sort(key=lambda x: x[1], reverse=True)
-                            enc["initiative"]=init
-                            order = [n for n,_ in init]
-                            enc["combatants"].sort(key=lambda c: order.index(c["name"]))
-                            st.success("Initiative set.")
-                            st.rerun()
-                    else:
-                        st.markdown("**Initiative:** " + " → ".join([f"{n}({i})" for n,i in enc["initiative"]]))
-                        cA,cB,cC,cD = st.columns(4)
-                        if cA.button("Next Turn"):
-                            enc["turn_index"] = (enc["turn_index"]+1) % len(enc["combatants"])
-                            if enc["turn_index"]==0: enc["round"]+=1
-                            acting = enc["combatants"][enc["turn_index"]]
-                            if acting["is_player"] and acting["current_hp"]==0 and not acting["dead"]:
-                                perform_death_save(acting, enc["log"])
-                            st.rerun()
-                        if cB.button("End Encounter"):
-                            end_encounter(st.session_state)
-                            xp = st.session_state["encounter"]["xp_reward"]
-                            st.success(f"Encounter ended. Party awarded {xp} XP (split).")
-                            # Narrate aftermath
-                            st.session_state["history"].append({"role":"assistant","content": ai_narrate_block(st.session_state, "The battle smoke thins; take stock of the aftermath.")})
-                            st.rerun()
-                        if cC.button("Short Rest"):
-                            for c in enc["combatants"]:
-                                if c["is_player"] and not c.get("dead"):
-                                    cobj=st.session_state["characters"][c["name"]]
-                                    heal = max(1, 2+int(cobj.get("con_mod",0)))
-                                    cobj["current_hp"] = min(cobj.get("max_hp",20), cobj["current_hp"]+heal)
-                                    c["current_hp"]=cobj["current_hp"]
-                            st.info("Short Rest: each PC recovers a small amount of HP.")
-                        if cD.button("Long Rest"):
-                            for c in enc["combatants"]:
-                                if c["is_player"] and not c.get("dead"):
-                                    cobj=st.session_state["characters"][c["name"]]
-                                    cobj["current_hp"]=cobj.get("max_hp",20)
-                                    cls=canonical_class(cobj.get("race_class"))
-                                    if cls in CLASS_SLOTS:
-                                        m=CLASS_SLOTS[cls]["1"]
-                                        cobj.setdefault("spell_slots",{}); cobj["spell_slots"]["1"]={"max":m,"current":m}
-                                    c["current_hp"]=cobj["current_hp"]
-                            enc["bless"]=set()
-                            st.info("Long Rest: PCs fully heal and recover slots.")
+        with st.expander("World & Difficulty", expanded=False):
+            st.info(f"**Setting:** {st.session_state.get('setup_setting')} / {st.session_state.get('setup_genre')}")
+            st.info(f"**Difficulty:** {st.session_state.get('setup_difficulty')}")
+            st.markdown(f"**World Details:** {st.session_state.get('custom_setting_description')}")
 
         st.markdown("---")
-        st.subheader("Save / Load")
-        if st.button("💾 Save Game"):
-            payload = {
-                "characters": st.session_state["characters"],
-                "current_player": st.session_state["current_player"],
-                "setting": st.session_state["setup_setting"],
-                "genre": st.session_state["setup_genre"],
-                "difficulty": st.session_state["setup_difficulty"],
-                "use_ai_narration": st.session_state["use_ai_narration"]
-            }
-            st.download_button("Download Save JSON", data=json.dumps(payload, indent=2),
-                               file_name="srd_rpg_save.json", mime="application/json")
-        up = st.file_uploader("Load Save", type="json")
-        if up and st.button("Load Now"):
-            try:
-                data=json.loads(up.read())
-                st.session_state["characters"]=data["characters"]
-                st.session_state["current_player"]=data["current_player"]
-                st.session_state["setup_setting"]=data.get("setting","Classic Fantasy")
-                st.session_state["setup_genre"]=data.get("genre","High Magic Quest")
-                st.session_state["setup_difficulty"]=data.get("difficulty","Normal (Balanced)")
-                st.session_state["use_ai_narration"]=data.get("use_ai_narration",False) and (client is not None)
-                st.success("Loaded.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Load error: {e}")
+        st.subheader("Save/Load")
+        if st.button("💾 Save Adventure", disabled=not game_started, on_click=save_game):
+            pass
+        if st.session_state["saved_game_json"]:
+            st.download_button("Download Game File", st.session_state["saved_game_json"],
+                               file_name="gemini_rpg_save.json", mime="application/json")
 
-        st.markdown('<small class="srd-note">Includes material compatible with the D&D 5e SRD (CC-BY-4.0). This app uses original wording for rules and brief functional spell summaries.</small>', unsafe_allow_html=True)
+        st.markdown('<small class="srd-note">This work includes material from the D&D 5.1/5.2 System Reference Documents (SRD), '
+                    'licensed under CC-BY-4.0 by Wizards of the Coast. You may reuse SRD portions with proper attribution.</small>',
+                    unsafe_allow_html=True)
 
-    # ======== Main column: Story Log + Action Console ========
-    col_main = st.container()
-    with col_main:
+    # ---------------------- MAIN CHAT AREA ----------------------
+    with col_chat:
         st.header("The Story Log")
-        for msg in st.session_state["history"][-200:]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        for message in reversed(st.session_state["history"]):
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        enc=st.session_state.get("encounter")
-        ch=st.session_state["characters"][st.session_state["current_player"]]
+    # ---------------------- INPUT AREA ----------------------
+    if game_started:
+        prompt = st.chat_input("What do you do?")
+        with st.container():
+            st.markdown('<div class="continue-bar"></div>', unsafe_allow_html=True)
+            continue_clicked = st.button("▶ Continue / Next scene")
 
-        st.subheader("Action Console")
-        if enc and enc.get("active") and enc.get("initiative"):
-            acting = enc["combatants"][enc["turn_index"]]
-            st.caption(f"Acting: {acting['name']} (Round {enc['round']})")
+        if (prompt is not None and prompt.strip() != "") or continue_clicked:
+            current_player_name = st.session_state["current_player"]
+            active_char = st.session_state["characters"].get(current_player_name)
+            ensure_equipped_slots(active_char)
+            normalize_all_equipped(active_char)
+            active_char['race_class'] = canonical_class(active_char.get('race_class'))
+            initialize_or_validate_spells(active_char)
 
-            if acting["is_player"] and acting["name"]==ch["name"] and not acting.get("dead"):
-                cA,cB = st.columns(2)
-                with cA:
-                    st.markdown("**Attack (Weapon)**")
-                    arms=[]
-                    for s in ("right_arm","left_arm"):
-                        e=ch["equipped"].get(s)
-                        if e and e.get("stats",{}).get("type")=="weapon":
-                            if e not in arms: arms.append(e)
-                    wep = st.selectbox("Weapon", [e["item"] for e in arms] or ["—"], key="atk_wep")
-                    targets=[c["name"] for c in enc["combatants"] if not c["is_player"] and not c.get("dead") and c["current_hp"]>0]
-                    tgt = st.selectbox("Target", targets or ["—"], key="atk_tgt")
-                    if st.button("Attack!"):
-                        if wep=="—" or tgt=="—":
-                            st.warning("Pick a weapon and a target.")
-                        else:
-                            wstats=item_stats(wep) or {}
-                            bonus, abil = dm_attack_bonus(ch, wstats)
-                            bless_bonus = roll("1d4") if ch["name"] in enc.get("bless", set()) else 0
-                            d20 = random.randint(1,20)
-                            total = d20 + bonus + bless_bonus
-                            target = next(x for x in enc["combatants"] if x["name"]==tgt)
-                            crit = (d20==20)
-                            hit = (total >= target["ac"]) or crit
-                            lines=[f"{ch['name']} attacks {tgt} with {wep}: d20 {d20} + bonus {bonus}{' + bless '+str(bless_bonus) if bless_bonus else ''} = {total} vs AC {target['ac']} — {'HIT' if hit else 'MISS'}."]
-                            if hit:
-                                base = dm_damage_roll(wstats, int(ch.get(abil,0)))
-                                dmg = base*2 if crit else base
-                                target["current_hp"]-=dmg
-                                lines.append(f"Damage: {dmg}.")
-                                if target["current_hp"]<=0: handle_ko_or_death(target, lines)
-                            enc["log"].extend(lines)
-                            st.session_state["history"].append({"role":"assistant","content":"\n".join(lines)})
-                            # Narrate with AI
-                            story = ai_narrate_block(st.session_state, f"{ch['name']} attacks {tgt} with {wep}.")
-                            st.session_state["history"].append({"role":"assistant","content": story})
-                            st.session_state["_scroll_to_top"]=True; st.rerun()
-
-                with cB:
-                    cls=canonical_class(ch.get("race_class"))
-                    if cls in CLASS_SPELLS:
-                        st.markdown("**Cast Spell (Lv1)**")
-                        ensure_spell_fields(ch)
-                        prepared = ch["spells_prepared"]
-                        sname = st.selectbox("Spell", prepared or ["—"], key="cast_spell")
-                        all_targets = [c["name"] for c in enc["combatants"] if c["name"]!=ch["name"] and not c.get("dead")]
-                        s_tgt = st.selectbox("Target (if needed)", all_targets or ["—"], key="cast_target")
-                        if st.button("Cast"):
-                            if sname=="—":
-                                st.warning("Pick a spell.")
-                            else:
-                                logs=do_spell_effect(st.session_state, ch, sname, s_tgt if s_tgt!="—" else "")
-                                enc["log"].extend(logs)
-                                st.session_state["history"].append({"role":"assistant","content":"\n".join(logs)})
-                                story = ai_narrate_block(st.session_state, f"{ch['name']} casts {sname}.")
-                                st.session_state["history"].append({"role":"assistant","content": story})
-                                st.session_state["_scroll_to_top"]=True; st.rerun()
-
-                st.markdown('<hr class="slim">', unsafe_allow_html=True)
-                cX,cY,cZ = st.columns(3)
-                with cX:
-                    if st.button("Dodge / Disengage / Dash"):
-                        st.session_state["history"].append({"role":"assistant","content": f"{ch['name']} takes a tactical maneuver."})
-                        st.session_state["history"].append({"role":"assistant","content": ai_narrate_block(st.session_state, f"{ch['name']} repositions carefully.")})
-                        st.session_state["_scroll_to_top"]=True; st.rerun()
-                with cY:
-                    heal_amt = st.number_input("Use Item / Heal HP", min_value=0, max_value=50, value=0, step=1)
-                    if st.button("Apply Self-Heal"):
-                        ch["current_hp"]=min(ch.get("max_hp",20), ch["current_hp"]+int(heal_amt))
-                        st.session_state["history"].append({"role":"assistant","content": f"{ch['name']} uses an item and recovers {heal_amt} HP."})
-                        st.session_state["history"].append({"role":"assistant","content": ai_narrate_block(st.session_state, f"{ch['name']} tends to wounds.")})
-                        st.session_state["_scroll_to_top"]=True; st.rerun()
-                with cZ:
-                    if st.button("End My Turn"):
-                        enc["turn_index"]=(enc["turn_index"]+1)%len(enc["combatants"])
-                        if enc["turn_index"]==0: enc["round"]+=1
-                        nxt=enc["combatants"][enc["turn_index"]]
-                        if nxt["is_player"] and nxt["current_hp"]==0 and not nxt.get("dead"):
-                            perform_death_save(nxt, enc["log"])
-                        st.session_state["_scroll_to_top"]=True; st.rerun()
+            if prompt and prompt.strip():
+                st.session_state["history"].append({"role":"user","content":f"({current_player_name}'s Turn): {prompt}"})
             else:
-                st.info("Not your turn or you are down/dead.")
-        else:
-            # Freeform exploration / AI narration
-            prompt = st.chat_input("What do you do?")
-            with st.container():
-                st.markdown('<div class="continue-bar"></div>', unsafe_allow_html=True)
-                cont = st.button("▶ Continue / Next scene")
-            if (prompt is not None) or cont:
-                text = (prompt or "").strip()
-                if text:
-                    st.session_state["history"].append({"role":"user","content":f"({st.session_state['current_player']}): {text}"})
-                # Always narrate (AI if available)
-                story = ai_narrate_block(st.session_state, text or "(continue)")
-                st.session_state["history"].append({"role":"assistant","content": story})
-                st.session_state["_scroll_to_top"]=True
+                st.session_state["history"].append({"role":"user","content":
+                    f"({current_player_name}) asks the Storyteller to continue describing the scene or advance to the next meaningful beat."})
+
+            with st.spinner("The DM is thinking..."):
+                final_cfg = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"])
+                raw_roll = extract_roll(prompt) if (prompt and prompt.strip()) else None
+
+                # Summaries for the model
+                eq_summary = {SLOT_LABEL[s]: active_char["equipped"][s] for s in SLOTS if active_char["equipped"].get(s)}
+                ac_val, _ = compute_ac(active_char)
+                caster_line = short_spellline(active_char)
+
+                # Logic call only if there was a roll
+                if raw_roll is not None:
+                    logic_prompt = f"""
+                    RESOLVE A PLAYER ACTION (SRD-style):
+                    Character JSON: {json.dumps(active_char)}
+                    Equipped (by slot): {json.dumps(eq_summary)}
+                    Derived: Armor Class = {ac_val}; Caster: {caster_line}
+                    Player Action: "{prompt}"
+                    Rules:
+                    - Use STR for melee unless weapon has finesse; DEX for ranged; apply properties when relevant.
+                    - Respect two-handed: if weapon has "two-handed", both arms are occupied; no shield benefits.
+                    - Choose a reasonable DC (10–20) and compute total = d20 roll ({raw_roll}) + the relevant ability modifier.
+                    - If the action is a spellcasting attempt, ensure the spell is class-appropriate and prepared, and consume a slot.
+                    Return ONLY the SkillCheckResolution JSON.
+                    """
+                    try:
+                        logic_cfg = GenerateContentConfig(system_instruction=st.session_state["final_system_instruction"],
+                                                          response_mime_type="application/json",
+                                                          response_schema=SkillCheckResolution)
+                        lresp = client.models.generate_content(model='gemini-2.5-flash',
+                                                               contents=logic_prompt, config=logic_cfg)
+                        raw = lresp.text or ""
+                        if raw.strip():
+                            skill = json.loads(raw)
+                            roll = skill.get('player_d20_roll','N/A')
+                            mod  = skill.get('attribute_modifier','N/A')
+                            total= skill.get('total_roll','N/A')
+                            dc   = skill.get('difficulty_class','N/A')
+                            st.markdown(f"""
+                            <div style="border:2px solid #2e7d32;padding:10px;border-radius:8px;background-color:#1e1e1e;color:#ffffff;">
+                              <div style="font-weight:700;margin-bottom:6px;">{skill.get('outcome_result','').upper()}! ({skill.get('attribute_used','')} Check)</div>
+                              <hr style="border:none;border-top:1px solid #555;margin:6px 0;">
+                              <div><strong>Roll:</strong> {roll} + <strong>Mod:</strong> {mod} = <strong>{total}</strong> (vs <strong>DC:</strong> {dc})</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.toast(f"Result: {skill.get('outcome_result','')}")
+                            follow_up = f"""
+                            The player's risky action was resolved. EXACT JSON outcome: {json.dumps(skill)}.
+                            1) Narrate vivid consequences consistent with SRD gear/properties and AC.
+                            2) If a spell was involved, ensure it was class-appropriate and slots are respected.
+                            3) Ask what the player does next.
+                            """
+                            st.session_state["history"].append({"role":"assistant","content":f"//Mechanics: {json.dumps(skill)}//"})
+                            st.session_state["history"].append({"role":"user","content": follow_up})
+                        else:
+                            st.session_state["history"].append({"role":"assistant","content":"(No JSON from logic call.)"})
+                    except Exception as e:
+                        st.session_state["history"].append({"role":"assistant","content":f"Logic error: {e}"})
+
+                # Narrative call (always)
+                try:
+                    nresp = client.models.generate_content(model='gemini-2.5-flash',
+                                                           contents=get_api_contents(st.session_state["history"]),
+                                                           config=final_cfg)
+                    st.session_state["history"].append({"role":"assistant","content": safe_model_text(nresp)})
+                except Exception as e:
+                    st.session_state["history"].append({"role":"assistant","content": f"Narrative error: {e}"})
+                # NEW: request top scroll, then rerun
+                st.session_state["_scroll_to_top"] = True
                 st.rerun()
+
+# End of file
